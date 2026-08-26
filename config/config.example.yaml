@@ -59,7 +59,7 @@ cue_split:
 
 qbittorrent:
   enabled: false
-  base_url: http://127.0.0.1:8082
+  base_url: http://host.docker.internal:8082
   username: ''
   password_file: '/app/data/secrets/qbittorrent_password'
   api_key_file: '/app/data/secrets/qbittorrent_api_key'
@@ -95,7 +95,7 @@ review:
   proxy_username: ''
   proxy_password_file: '/app/data/secrets/review_proxy_password'
   directory: '/media/library/music'
-  recycle_directory: '/media/#recycle/music-organizer'
+  recycle_directory: '/media/recycle/music-organizer'
   library: '/app/data/review-beets-library.db'
   config_path: '/app/data/review-beets-config.yaml'
   path_format: $album_dir/%if{$albumartist,$album/}$disc_prefix$track_prefix$picard_multiartist_prefix$title
@@ -119,7 +119,7 @@ translation:
 notifications:
   magicpush:
     enabled: false
-    base_url: 'http://127.0.0.1:818'
+    base_url: 'http://host.docker.internal:818'
     token_file: '/run/secrets/magicpush/token'
     title: 'Music Organizer'
     type: text

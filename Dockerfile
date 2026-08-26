@@ -55,7 +55,7 @@ COPY --from=frontend-build /frontend/dist ./frontend_dist
 RUN chown -R ${APP_UID}:${APP_GID} /app
 
 ARG SOURCE_REVISION=unknown
-ARG SOURCE_URL=https://gitea.softfuttery.cn:4443/zzp/music-organizer
+ARG SOURCE_URL=https://github.com/softfuttery/music-organizer
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.revision="${SOURCE_REVISION}"
 ENV SOURCE_REVISION=${SOURCE_REVISION}

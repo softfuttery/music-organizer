@@ -15,6 +15,7 @@ beets-flask-test/
 .codex/
 .env
 .env.*
+!.env.example
 secrets/*
 !secrets/README.md
 frontend-vue/node_modules/

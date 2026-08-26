@@ -74,7 +74,7 @@ const sections = [
       { name: 'review_proxy_password', label: '代理密码', type: 'password', secret: true },
       { name: 'review_source_roots', label: '允许选择的 Inbox 目录', type: 'textarea', rows: 3, wide: true, help: '每行一个容器内绝对路径。' },
       { name: 'review_directory', label: '入库目标目录', wide: true },
-      { name: 'review_recycle_directory', label: '群晖回收站目录', wide: true },
+      { name: 'review_recycle_directory', label: '回收目录', wide: true },
       { name: 'review_library', label: 'Library DB' },
       { name: 'review_config_path', label: 'beets Config 路径' },
       { name: 'review_import_mode', label: '入库方式', type: 'select', options: [{ value: 'hardlink', label: 'hardlink' }, { value: 'copy', label: 'copy' }, { value: 'move', label: 'move' }] },

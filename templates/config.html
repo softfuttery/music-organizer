@@ -253,7 +253,7 @@
             </div>
             <div class="col-md-6">
               <label class="form-label">MusicBrainz HTTP 代理</label>
-              <input class="form-control font-monospace" name="review_proxy_url" value="{{ review.proxy_url }}" placeholder="http://10.0.0.2:7890">
+              <input class="form-control font-monospace" name="review_proxy_url" value="{{ review.proxy_url }}" placeholder="http://host.docker.internal:7890">
               <div class="form-text">留空时直连；同时用于 HTTP 和 HTTPS 请求。</div>
             </div>
             <div class="col-md-3">
@@ -266,18 +266,18 @@
             </div>
             <div class="col-md-6">
               <label class="form-label">允许选择的 Inbox 目录</label>
-              <textarea class="form-control font-monospace" rows="2" name="review_source_roots" placeholder="/volume2/影视/整理/音乐">{% for root in review.source_roots %}{{ root }}
+              <textarea class="form-control font-monospace" rows="2" name="review_source_roots" placeholder="/media/incoming/music">{% for root in review.source_roots %}{{ root }}
 {% endfor %}</textarea>
               <div class="form-text">每行一个容器内绝对路径；前端无法浏览这些目录之外的位置。</div>
             </div>
             <div class="col-md-6">
               <label class="form-label">入库目标目录</label>
-              <input class="form-control font-monospace" name="review_directory" value="{{ review.directory or '/media/library/music' }}" placeholder="/volume2/影视/整理/音乐-test">
+              <input class="form-control font-monospace" name="review_directory" value="{{ review.directory or '/media/library/music' }}" placeholder="/media/library/music">
               <div class="form-text">只会在“音乐预审”页确认具体发行版本后写入，不再有自动入库流程。</div>
             </div>
             <div class="col-md-6">
-              <label class="form-label">群晖回收站目录</label>
-              <input class="form-control font-monospace" name="review_recycle_directory" value="{{ review.recycle_directory }}" placeholder="/volume2/影视/#recycle/music-organizer">
+              <label class="form-label">回收目录</label>
+              <input class="form-control font-monospace" name="review_recycle_directory" value="{{ review.recycle_directory }}" placeholder="/media/recycle/music-organizer">
               <div class="form-text">“移入回收站”会把专辑整体移动到这里；建议使用 Inbox 所在共享文件夹的 #recycle 子目录。</div>
             </div>
             <div class="col-md-6">

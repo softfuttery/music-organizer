@@ -388,19 +388,19 @@ def create_review_blueprint(
 
             recycle_value = str(review.get("recycle_directory") or "").strip()
             if not recycle_value:
-                raise ValueError("请先在配置页设置群晖回收站目录")
+                raise ValueError("请先在配置页设置回收目录")
             recycle = Path(recycle_value).expanduser()
             if not recycle.is_absolute():
-                raise ValueError("群晖回收站必须使用容器内绝对路径")
+                raise ValueError("回收目录必须使用容器内绝对路径")
             if recycle.is_symlink():
-                raise ValueError("群晖回收站目录不能是符号链接")
+                raise ValueError("回收目录不能是符号链接")
             recycle_parent = recycle.parent.resolve(strict=True)
             if not recycle_parent.is_dir():
-                raise ValueError("群晖回收站的父目录不可用")
+                raise ValueError("回收目录的父目录不可用")
             recycle.mkdir(exist_ok=True)
             recycle = recycle.resolve(strict=True)
             if recycle == source or recycle.is_relative_to(source):
-                raise ValueError("群晖回收站不能位于待移动的专辑目录内")
+                raise ValueError("回收目录不能位于待移动的专辑目录内")
 
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             destination = recycle / f"{stamp}-review-{item_id}-{source.name}"

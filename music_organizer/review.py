@@ -1453,7 +1453,7 @@ class ReviewRepository:
                     json.dumps(
                         {
                             "outcome": "source_recycled",
-                            "message": "用户选择不入库，源专辑目录已移入群晖回收站",
+                            "message": "用户选择不入库，源专辑目录已移入回收目录",
                             "recycle_destination": str(destination),
                         },
                         ensure_ascii=False,

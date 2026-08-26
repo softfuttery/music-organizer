@@ -943,13 +943,13 @@ function itemBusy(item) {
 
 async function recycleSource(item) {
   const confirmed = window.confirm(
-    `把预审专辑文件夹“${item.source_path}”整体移入群晖回收站？\n\n只移动当前 Inbox 中的这个目录，不会处理其他路径中的 qBittorrent 做种文件。`,
+    `把预审专辑文件夹“${item.source_path}”整体移入回收目录？\n\n只移动当前 Inbox 中的这个目录，不会处理其他路径中的 qBittorrent 做种文件。`,
   )
   if (!confirmed) return
   const requestToken = beginItemRequest(item)
   try {
     await recycleReviewSource(item.id, item.source_path)
-    notice.value = `已将专辑文件夹移入群晖回收站：${item.source_path}`
+    notice.value = `已将专辑文件夹移入回收目录：${item.source_path}`
     await Promise.all([refresh(), browse()])
   } catch (requestError) {
     error.value = requestError.message
@@ -1167,7 +1167,7 @@ onBeforeUnmount(() => {
                 v-if="scope === 'active' && canDecide(item)"
                 class="recycle-source-button"
                 :disabled="itemBusy(item)"
-                title="把整个源专辑文件夹移入群晖回收站"
+                title="把整个源专辑文件夹移入回收目录"
                 @click="recycleSource(item)"
               ><Trash2 :size="14" />移入回收站</button>
               <button
