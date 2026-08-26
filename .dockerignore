@@ -1,0 +1,26 @@
+# Deny by default: only files explicitly copied by the Dockerfile enter the
+# build context. Runtime config, .env files, secrets, databases and backups can
+# therefore never be uploaded to the builder.
+**
+!.dockerignore
+!Dockerfile
+!requirements.lock
+!app.py
+!organizer.py
+!worker.py
+!review_worker.py
+!music_organizer/
+!music_organizer/**
+!static/
+!static/**
+!templates/
+!templates/**
+!frontend-vue/
+!frontend-vue/index.html
+!frontend-vue/package.json
+!frontend-vue/package-lock.json
+!frontend-vue/vite.config.js
+!frontend-vue/public/
+!frontend-vue/public/**
+!frontend-vue/src/
+!frontend-vue/src/**

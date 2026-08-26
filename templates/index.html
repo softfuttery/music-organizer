@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>music-organizer</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+  <nav class="navbar navbar-expand-lg bg-dark navbar-dark">
+    <div class="container">
+      <a class="navbar-brand fw-semibold" href="/">music-organizer</a>
+      <div class="navbar-nav">
+        <a class="nav-link active" href="/">仪表盘</a>
+        <a class="nav-link" href="/history">历史记录</a>
+        <a class="nav-link" href="/config">配置</a>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container py-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+      <div>
+        <h1 class="h3 mb-1">音乐文件自动整理服务</h1>
+        <div class="text-secondary">当前模式：<span class="badge text-bg-primary">{{ stats.mode }}</span></div>
+      </div>
+      <div class="d-flex flex-wrap gap-2">
+        <button class="btn btn-outline-primary" id="qbTriggerBtn" type="button">检查 qBittorrent</button>
+        <button class="btn btn-success" id="triggerBtn" type="button">手动触发整理</button>
+        <button class="btn btn-outline-danger d-none" id="stopBtn" type="button">停止</button>
+      </div>
+    </div>
+
+    <div class="alert alert-info d-none" id="triggerAlert"></div>
+
+    <div class="row g-3 mb-4">
+      <div class="col-md-3">
+        <div class="card shadow-sm h-100">
+          <div class="card-body">
+            <div class="text-secondary small">总记录数</div>
+            <div class="display-6">{{ stats.total_files }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card shadow-sm h-100">
+          <div class="card-body">
+            <div class="text-secondary small">已整理数</div>
+            <div class="display-6">{{ stats.organized_files }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card shadow-sm h-100">
+          <div class="card-body">
+            <div class="text-secondary small">下次运行时间</div>
+            <div class="fs-5">{{ next_run_time or '未启用' }}</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-md-3">
+        <div class="card shadow-sm h-100">
+          <div class="card-body">
+            <div class="text-secondary small">待预审</div>
+            <div class="display-6">{{ stats.review_active }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm mb-4">
+      <div class="card-header bg-white fw-semibold">路径映射</div>
+      <div class="card-body">
+        {% for source, target in stats.paths_mapping.items() %}
+          <div class="mb-2">
+            <div class="small text-secondary">源路径</div>
+            <code>{{ source }}</code>
+          </div>
+          <div>
+            <div class="small text-secondary">目标路径</div>
+            <code>{{ target }}</code>
+          </div>
+        {% else %}
+          <div class="text-secondary">暂无路径映射</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="card shadow-sm mb-4">
+      <div class="card-header bg-white fw-semibold">qBittorrent 联动</div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-3">
+            <div class="small text-secondary">模式</div>
+            <span class="badge {% if stats.qbittorrent.enabled %}text-bg-success{% else %}text-bg-secondary{% endif %}">
+              {{ '主动检查已启用' if stats.qbittorrent.enabled else '未启用' }}
+            </span>
+          </div>
+          <div class="col-md-5">
+            <div class="small text-secondary">Web UI</div>
+            <code>{{ stats.qbittorrent.base_url or '未配置' }}</code>
+          </div>
+          <div class="col-md-4">
+            <div class="small text-secondary">完成后等待</div>
+            <span>{{ stats.qbittorrent.min_completion_age_seconds or 0 }} 秒</span>
+          </div>
+          <div class="col-md-4">
+            <div class="small text-secondary">扫描范围</div>
+            <span>{{ '完成种子路径' if stats.qbittorrent.scan_mode != 'full' else '全量扫描' }}</span>
+          </div>
+          <div class="col-md-4">
+            <div class="small text-secondary">检查模式</div>
+            <span>{{ 'sync 增量' if stats.qbittorrent.poll_mode != 'completed_list' else 'completed 列表' }}</span>
+          </div>
+          <div class="col-md-4">
+            <div class="small text-secondary">过滤</div>
+            <span>{{ stats.qbittorrent.category or '全部分类' }} / {{ stats.qbittorrent.tag or '全部标签' }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm mb-4">
+      <div class="card-header bg-white fw-semibold">最近运行</div>
+      <div class="card-body">
+        {% if stats.last_run %}
+          <div class="row g-3">
+            <div class="col-md-3"><span class="text-secondary">开始：</span>{{ stats.last_run.started_at }}</div>
+            <div class="col-md-3"><span class="text-secondary">结束：</span>{{ stats.last_run.finished_at or '运行中' }}</div>
+            <div class="col-md-2"><span class="text-secondary">扫描：</span>{{ stats.last_run.scanned }}</div>
+            <div class="col-md-2"><span class="text-secondary">整理：</span>{{ stats.last_run.organized }}</div>
+            <div class="col-md-2"><span class="text-secondary">失败：</span>{{ stats.last_run.failed }}</div>
+          </div>
+        {% else %}
+          <div class="text-secondary">尚未运行</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card shadow-sm mb-4">
+      <div class="card-header bg-white fw-semibold">最近 10 条记录</div>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>状态</th>
+              <th>源文件</th>
+              <th>目标文件</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in stats.recent %}
+              <tr>
+                <td class="text-nowrap">{{ item.created_at }}</td>
+                <td><span class="badge text-bg-success">{{ item.status }}</span></td>
+                <td><code>{{ item.source_path }}</code></td>
+                <td><code>{{ item.target_path }}</code></td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4" class="text-center text-secondary py-4">暂无记录</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card shadow-sm">
+      <div class="card-header bg-white fw-semibold">最近 qBittorrent 完成记录</div>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>状态</th>
+              <th>种子</th>
+              <th>消息</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in stats.recent_qb_torrents %}
+              <tr>
+                <td class="text-nowrap">{{ item.created_at }}</td>
+                <td>
+                  <span class="badge text-bg-success">{{ item.status }}</span>
+                </td>
+                <td><code>{{ item.name }}</code></td>
+                <td>{{ item.message }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4" class="text-center text-secondary py-4">暂无 qb 完成记录</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+  <script>
+    const triggerBtn = document.getElementById('triggerBtn');
+    const qbTriggerBtn = document.getElementById('qbTriggerBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const triggerAlert = document.getElementById('triggerAlert');
+    const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+    let refreshTimer = null;
+
+    function postOptions() {
+      return { method: 'POST', headers: { 'X-CSRF-Token': csrfToken } };
+    }
+
+    function showAlert(message, type = 'info') {
+      triggerAlert.className = `alert alert-${type}`;
+      triggerAlert.textContent = message;
+    }
+
+    function scheduleRefresh() {
+      if (refreshTimer) {
+        window.clearTimeout(refreshTimer);
+      }
+      refreshTimer = window.setTimeout(refreshJob, 3000);
+    }
+
+    async function refreshJob() {
+      const response = await fetch('/api/job');
+      const data = await response.json();
+      if (data.running) {
+        triggerBtn.disabled = true;
+        qbTriggerBtn.disabled = true;
+        stopBtn.classList.remove('d-none');
+        stopBtn.disabled = data.message === 'stopping';
+        if (data.message === 'stopping') {
+          showAlert('正在停止整理任务，请稍候...');
+        } else if (data.status === 'queued') {
+          showAlert('任务已写入持久队列，等待 Worker 领取...');
+        } else {
+          showAlert(`整理正在后台运行，开始时间：${data.started_at || ''}`);
+        }
+        scheduleRefresh();
+        return;
+      }
+      triggerBtn.disabled = false;
+      qbTriggerBtn.disabled = false;
+      stopBtn.disabled = false;
+      stopBtn.classList.add('d-none');
+      if (data.finished_at && data.result) {
+        const result = data.result;
+        if (data.status === 'cancelled') {
+          showAlert(`整理已停止：扫描 ${result.scanned}，整理 ${result.organized}，跳过 ${result.skipped}，失败 ${result.failed}`, 'warning');
+        } else {
+          showAlert(`整理完成：扫描 ${result.scanned}，整理 ${result.organized}，跳过 ${result.skipped}，失败 ${result.failed}`, result.failed ? 'warning' : 'success');
+        }
+      }
+    }
+
+    triggerBtn.addEventListener('click', async () => {
+      triggerBtn.disabled = true;
+      qbTriggerBtn.disabled = true;
+      showAlert('已提交整理任务，正在后台运行...');
+      const response = await fetch('/api/trigger', postOptions());
+      if (!response.ok && response.status !== 409) {
+        showAlert('触发失败，请查看日志。', 'danger');
+        triggerBtn.disabled = false;
+        return;
+      }
+      refreshJob();
+    });
+
+    qbTriggerBtn.addEventListener('click', async () => {
+      triggerBtn.disabled = true;
+      qbTriggerBtn.disabled = true;
+      showAlert('正在检查 qBittorrent，发现新完成种子后会自动整理...');
+      const response = await fetch('/api/qb/trigger', postOptions());
+      if (!response.ok && response.status !== 409) {
+        showAlert('检查 qb 失败，请查看日志。', 'danger');
+        triggerBtn.disabled = false;
+        qbTriggerBtn.disabled = false;
+        return;
+      }
+      refreshJob();
+    });
+
+    stopBtn.addEventListener('click', async () => {
+      stopBtn.disabled = true;
+      showAlert('已请求停止整理任务，正在收尾...');
+      const response = await fetch('/api/stop', postOptions());
+      if (!response.ok && response.status !== 409) {
+        showAlert('停止失败，请查看日志。', 'danger');
+        stopBtn.disabled = false;
+        return;
+      }
+      refreshJob();
+    });
+
+    refreshJob();
+  </script>
+</body>
+</html>

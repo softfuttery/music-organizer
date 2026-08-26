@@ -1,0 +1,24 @@
+{
+  "name": "Music Organizer",
+  "short_name": "音乐整理",
+  "description": "音乐整理、预审与媒体库管理工作台",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f5f5f4",
+  "theme_color": "#171717",
+  "icons": [
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    { "name": "音乐预审", "short_name": "预审", "url": "/review" },
+    { "name": "音乐库", "short_name": "音乐库", "url": "/library" }
+  ]
+}

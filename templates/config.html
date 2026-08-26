@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>config - music-organizer</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="{{ url_for('static', filename='admin-theme.css') }}" rel="stylesheet">
+</head>
+<body class="bg-light">
+  <div class="admin-shell">
+    {% set active_page = 'config' %}
+    {% include '_admin_sidebar.html' %}
+    <main class="admin-workspace">
+      <div class="admin-content">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-4">
+      <div>
+        <h1 class="h3 mb-1">配置</h1>
+        <div class="text-secondary">修改后会写入 <code>/app/config/config.yaml</code></div>
+      </div>
+    </div>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }}">{{ message }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="card shadow-sm mb-4">
+        <div class="card-header bg-white fw-semibold">路径与转移方式</div>
+        <div class="card-body">
+          <div class="mb-3">
+            <label class="form-label">路径映射</label>
+            <textarea class="form-control font-monospace" name="paths_mapping" rows="4">{{ paths_mapping }}</textarea>
+            <div class="form-text">每行一组：源路径 =&gt; 目标路径</div>
+          </div>
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label">转移方式</label>
+              <select class="form-select" name="mode">
+                <option value="hardlink" {% if config.mode == 'hardlink' %}selected{% endif %}>hardlink</option>
+                <option value="copy" {% if config.mode == 'copy' %}selected{% endif %}>copy</option>
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" for="keepDirStruct">目录结构</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="keep_dir_struct" id="keepDirStruct" {% if config.keep_dir_struct %}checked{% endif %}>
+                <label class="form-check-label" for="keepDirStruct">保持源目录结构</label>
+              </div>
+              <div class="form-text">保留来源路径中的相对目录层级。</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" for="mkdirIfSingle">单文件处理</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="mkdir_if_single" id="mkdirIfSingle" {% if config.mkdir_if_single %}checked{% endif %}>
+                <label class="form-check-label" for="mkdirIfSingle">单文件创建同名文件夹</label>
+              </div>
+              <div class="form-text">单个音频文件也创建同名目录。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row g-4">
+        <div class="col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-header bg-white fw-semibold">包含目录/文件</div>
+            <div class="card-body">
+              <label class="form-label">包含 glob</label>
+              <textarea class="form-control font-monospace mb-3" name="include_globs" rows="6">{{ include_globs }}</textarea>
+              <div class="form-text">留空表示全部扫描。示例：<code>Artist/**</code></div>
+              <label class="form-label mt-3">整理后缀</label>
+              <textarea class="form-control font-monospace" name="include_exts" rows="10">{{ include_exts }}</textarea>
+              <div class="form-text">每行一个后缀。`.cue` 和专辑图会随音频一起保留。</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-6">
+          <div class="card shadow-sm h-100">
+            <div class="card-header bg-white fw-semibold">排除规则</div>
+            <div class="card-body">
+              <label class="form-label">排除 glob</label>
+              <textarea class="form-control font-monospace mb-3" name="exclude_globs" rows="8">{{ exclude_globs }}</textarea>
+              <label class="form-label">排除后缀</label>
+              <textarea class="form-control font-monospace" name="exclude_exts" rows="4">{{ exclude_exts }}</textarea>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card shadow-sm my-4">
+        <div class="card-header bg-white fw-semibold">CUE 切分</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-3">
+              <label class="form-label" for="cueSplitEnabled">切分状态</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="cue_split_enabled" id="cueSplitEnabled" {% if cue_split.enabled %}checked{% endif %}>
+                <label class="form-check-label" for="cueSplitEnabled">启用 CUE 切分</label>
+              </div>
+              <div class="form-text">发现 CUE 时按轨道生成音频文件。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label" for="cueSkipExisting">重复文件</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="cue_skip_existing" id="cueSkipExisting" {% if cue_split.skip_existing %}checked{% endif %}>
+                <label class="form-check-label" for="cueSkipExisting">已存在则跳过</label>
+              </div>
+              <div class="form-text">目标音轨已存在时不重复生成。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label" for="cueSplitMultifileCues">多文件 CUE</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="cue_split_multifile_cues" id="cueSplitMultifileCues" {% if cue_split.split_multifile_cues %}checked{% endif %}>
+                <label class="form-check-label" for="cueSplitMultifileCues">切分多文件 CUE</label>
+              </div>
+              <div class="form-text">允许处理引用多个源文件的 CUE。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label" for="cueSkipSourceAudio">源音频处理</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="cue_skip_source_audio" id="cueSkipSourceAudio" {% if cue_split.skip_source_audio is not defined or cue_split.skip_source_audio %}checked{% endif %}>
+                <label class="form-check-label" for="cueSkipSourceAudio">跳过整轨源音频</label>
+              </div>
+              <div class="form-text">切分成功后不再整理整轨源文件。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">FFmpeg 路径</label>
+              <input class="form-control font-monospace" name="cue_ffmpeg_path" value="{{ cue_split.ffmpeg_path or 'ffmpeg' }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">FLAC 压缩等级</label>
+              <input class="form-control" type="number" min="0" max="12" name="cue_flac_compression_level" value="{{ cue_split.flac_compression_level if cue_split.flac_compression_level is defined else 6 }}">
+              <div class="form-text">6 对齐 foobar2000 Plus 的 FLAC Level6。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">输出子目录</label>
+              <input class="form-control" name="cue_output_subdir" value="{{ cue_split.output_subdir }}">
+              <div class="form-text">留空表示输出到专辑目录。</div>
+            </div>
+            <div class="col-12">
+              <label class="form-label">文件名模板</label>
+              <input class="form-control font-monospace" name="cue_filename_template" value="{{ cue_split.filename_template or '{track:02d} - {title}' }}">
+              <div class="form-text">可用变量：<code>{track:02d}</code>、<code>{total}</code>、<code>{title}</code>、<code>{performer}</code>、<code>{album}</code></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card shadow-sm my-4">
+        <div class="card-header bg-white fw-semibold">qBittorrent 主动联动</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-3">
+              <label class="form-label" for="qbEnabled">联动状态</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="qb_enabled" id="qbEnabled" {% if qbittorrent.enabled %}checked{% endif %}>
+                <label class="form-check-label" for="qbEnabled">启用主动检查</label>
+              </div>
+              <div class="form-text">定时检查新完成的音乐种子。</div>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">Web UI 地址</label>
+              <input class="form-control font-monospace" name="qb_base_url" value="{{ qbittorrent.base_url }}">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">用户名</label>
+              <input class="form-control" name="qb_username" value="{{ qbittorrent.username }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">密码</label>
+              <input class="form-control" type="password" name="qb_password" placeholder="{% if qb_password_saved %}已保存；留空保持不变{% else %}可留空{% endif %}">
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">API Key</label>
+              <input class="form-control font-monospace" type="password" name="qb_api_key" placeholder="{% if qb_api_key_saved %}已保存；留空保持不变{% else %}可留空{% endif %}">
+              <div class="form-text">qB 5.2+ 会优先使用 Bearer API key。</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">连接超时秒数</label>
+              <input class="form-control" type="number" min="3" max="120" name="qb_timeout" value="{{ qbittorrent.timeout or 10 }}">
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">完成后等待秒数</label>
+              <input class="form-control" type="number" min="0" max="3600" name="qb_min_completion_age_seconds" value="{{ qbittorrent.min_completion_age_seconds if qbittorrent.min_completion_age_seconds is defined else 60 }}">
+              <div class="form-text">避免刚完成时文件还没完全落盘。</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">扫描范围</label>
+              <select class="form-select" name="qb_scan_mode">
+                <option value="torrent_paths" {% if qbittorrent.scan_mode is not defined or qbittorrent.scan_mode == 'torrent_paths' %}selected{% endif %}>只扫描完成种子路径</option>
+                <option value="full" {% if qbittorrent.scan_mode == 'full' %}selected{% endif %}>发现完成后全量扫描</option>
+              </select>
+              <div class="form-text">日常建议只扫描完成种子的目录。</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">检查模式</label>
+              <select class="form-select" name="qb_poll_mode">
+                <option value="sync" {% if qbittorrent.poll_mode is not defined or qbittorrent.poll_mode == 'sync' %}selected{% endif %}>sync 增量</option>
+                <option value="completed_list" {% if qbittorrent.poll_mode == 'completed_list' %}selected{% endif %}>completed 列表</option>
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">分类过滤</label>
+              <input class="form-control" name="qb_category" value="{{ qbittorrent.category }}">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">标签过滤</label>
+              <input class="form-control" name="qb_tag" value="{{ qbittorrent.tag }}">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card shadow-sm my-4 review-settings-card">
+        <div class="card-header bg-white d-flex flex-wrap align-items-center justify-content-between gap-2">
+          <span class="fw-semibold">音乐预审与入库</span>
+          <span class="badge text-bg-light border">人工确认后执行</span>
+        </div>
+        <div class="card-body">
+          <div class="row g-3 review-settings-grid">
+            <div class="col-md-3">
+              <label class="form-label" for="reviewEnabled">工作流状态</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="review_enabled" id="reviewEnabled" {% if review.enabled %}checked{% endif %}>
+                <label class="form-check-label" for="reviewEnabled">启用人工确认入库</label>
+              </div>
+              <div class="form-text">开启后由“音乐预审”页确认入库。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">并发识别数</label>
+              <input class="form-control" type="number" min="1" max="8" name="review_identify_workers" value="{{ review.identify_workers or 3 }}">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label" for="reviewAutoDiscover">新音乐发现</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="review_auto_discover" id="reviewAutoDiscover" {% if review.auto_discover is not defined or review.auto_discover %}checked{% endif %}>
+                <label class="form-check-label" for="reviewAutoDiscover">自动加入识别队列</label>
+              </div>
+              <div class="form-text">只创建预审任务，仍需人工确认后入库。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">文件稳定等待（秒）</label>
+              <input class="form-control" type="number" min="10" max="86400" name="review_discovery_stable_seconds" value="{{ review.discovery_stable_seconds or 60 }}">
+              <input type="hidden" name="review_discovery_interval_seconds" value="{{ review.discovery_interval_seconds or 15 }}">
+              <div class="form-text">目录内容持续不变达到该时间后才识别，避免同步未完成。</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">MusicBrainz HTTP 代理</label>
+              <input class="form-control font-monospace" name="review_proxy_url" value="{{ review.proxy_url }}" placeholder="http://10.0.0.2:7890">
+              <div class="form-text">留空时直连；同时用于 HTTP 和 HTTPS 请求。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">代理账号</label>
+              <input class="form-control" name="review_proxy_username" value="{{ review.proxy_username }}" autocomplete="off">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">代理密码</label>
+              <input class="form-control" type="password" name="review_proxy_password" autocomplete="new-password" placeholder="{% if review_proxy_password_saved %}已保存；留空保持不变{% else %}可留空{% endif %}">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">允许选择的 Inbox 目录</label>
+              <textarea class="form-control font-monospace" rows="2" name="review_source_roots" placeholder="/volume2/影视/整理/音乐">{% for root in review.source_roots %}{{ root }}
+{% endfor %}</textarea>
+              <div class="form-text">每行一个容器内绝对路径；前端无法浏览这些目录之外的位置。</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">入库目标目录</label>
+              <input class="form-control font-monospace" name="review_directory" value="{{ review.directory or '/media/library/music' }}" placeholder="/volume2/影视/整理/音乐-test">
+              <div class="form-text">只会在“音乐预审”页确认具体发行版本后写入，不再有自动入库流程。</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">群晖回收站目录</label>
+              <input class="form-control font-monospace" name="review_recycle_directory" value="{{ review.recycle_directory }}" placeholder="/volume2/影视/#recycle/music-organizer">
+              <div class="form-text">“移入回收站”会把专辑整体移动到这里；建议使用 Inbox 所在共享文件夹的 #recycle 子目录。</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Library DB</label>
+              <input class="form-control font-monospace" name="review_library" value="{{ review.library }}" placeholder="/app/data/review-beets-library.db">
+              <div class="form-text">留空时使用 /app/data/review-beets-library.db。</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">beets Config 路径</label>
+              <input class="form-control font-monospace" name="review_config_path" value="{{ review.config_path }}" placeholder="/app/data/review-beets-config.yaml">
+              <div class="form-text">留空时自动生成预审专用配置，不需要手工维护。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">入库方式</label>
+              <select class="form-select" name="review_import_mode">
+                <option value="hardlink" {% if review.import_mode is not defined or review.import_mode == 'hardlink' %}selected{% endif %}>hardlink</option>
+                <option value="copy" {% if review.import_mode == 'copy' %}selected{% endif %}>copy</option>
+                <option value="move" {% if review.import_mode == 'move' %}selected{% endif %}>move</option>
+              </select>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label" for="reviewWriteTags">标签处理</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="review_write_tags" id="reviewWriteTags" {% if review.write_tags %}checked{% endif %}>
+                <label class="form-check-label" for="reviewWriteTags">写入文件标签</label>
+              </div>
+              <div class="form-text">入库时写入已确认的元数据。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label" for="reviewMoveExtraFiles">附加文件</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="review_move_extra_files" id="reviewMoveExtraFiles" {% if review.move_extra_files %}checked{% endif %}>
+                <label class="form-check-label" for="reviewMoveExtraFiles">移动匹配的附加文件</label>
+              </div>
+              <div class="form-text">匹配不区分大小写，复制成功后删除源文件。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label" for="reviewCleanupSource">源目录清理</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="review_cleanup_source_after_import" id="reviewCleanupSource" {% if review.cleanup_source_after_import %}checked{% endif %}>
+                <label class="form-check-label" for="reviewCleanupSource">删除已入库源文件和空目录</label>
+              </div>
+              <div class="form-text">未匹配文件不会删除，原目录会保留并给出提示。</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">附加文件匹配</label>
+              <input class="form-control font-monospace" name="review_extra_file_patterns" value="{{ review.extra_file_patterns | join(' ') }}" placeholder="*.jpg *.png">
+              <div class="form-text">使用空格、逗号或分号分隔；文件扩展名匹配不区分大小写。</div>
+            </div>
+            <div class="col-12">
+              <label class="form-label">路径模板（MusicBrainz Picard 预设 3）</label>
+              <input class="form-control font-monospace" name="review_path_format" value="{{ review.path_format or '$album_dir/%if{$albumartist,$album/}$disc_prefix$track_prefix$picard_multiartist_prefix$title' }}">
+              <div class="form-text">等价于：[专辑艺术家][专辑]/[多碟编号和音轨号] [多人专辑时的曲目艺术家] - [标题]。</div>
+            </div>
+            <div class="col-12">
+              <div class="alert alert-light border mb-0 review-settings-note">
+                识别和确认使用同一条持久预审队列。选择 hardlink 时，开启“写入文件标签”也会修改同一 inode 对应的 Inbox/做种文件标签；启用源目录清理只删除已确认入库的音频和成功转移的附加文件。
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card shadow-sm my-4" id="lyrics-translation">
+        <div class="card-header bg-white d-flex flex-wrap align-items-center justify-content-between gap-2">
+          <span class="fw-semibold">AI 歌词翻译</span>
+          <span class="badge {% if translation_api_key_saved %}text-bg-success{% else %}text-bg-secondary{% endif %}">
+            API Key {% if translation_api_key_saved %}已保存{% else %}未保存{% endif %}
+          </span>
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-3">
+              <label class="form-label" for="translationEnabled">翻译状态</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="translation_enabled" id="translationEnabled" {% if translation.enabled %}checked{% endif %}>
+                <label class="form-check-label" for="translationEnabled">启用日文歌词 AI 翻译</label>
+              </div>
+              <div class="form-text">仅发送带时间戳的日文歌词正文及当前标题、艺术家，不发送音频文件。</div>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">OpenAI 兼容接口地址</label>
+              <input class="form-control font-monospace" name="translation_base_url" value="{{ translation.base_url or 'https://api.deepseek.com' }}" placeholder="https://api.deepseek.com">
+              <div class="form-text">DeepSeek 填服务根地址；本地 Ollama 可填写 <code>http://主机:11434/v1</code>。</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">模型</label>
+              <input class="form-control font-monospace" name="translation_model" value="{{ translation.model or 'deepseek-v4-flash' }}" placeholder="deepseek-v4-flash">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">API Key</label>
+              <input class="form-control font-monospace" type="password" name="translation_api_key" autocomplete="new-password" placeholder="{% if translation_api_key_saved %}已保存；留空保持不变{% else %}请输入 DeepSeek API Key{% endif %}">
+              <div class="form-text">Key 只写入受限 secret 文件，不保存到 YAML，也不会发送给浏览器。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">翻译风格</label>
+              <select class="form-select" name="translation_style">
+                <option value="literal" {% if translation.style == 'literal' %}selected{% endif %}>忠实直译</option>
+                <option value="natural" {% if translation.style is not defined or translation.style == 'natural' %}selected{% endif %}>自然中文</option>
+                <option value="lyrical" {% if translation.style == 'lyrical' %}selected{% endif %}>歌词化表达</option>
+              </select>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">超时秒数</label>
+              <input class="form-control" type="number" min="10" max="300" name="translation_timeout" value="{{ translation.timeout or 120 }}">
+            </div>
+            <div class="col-12">
+              <div class="alert alert-light border mb-0">
+                翻译结果只载入歌词编辑器，不会自动写入标签或 LRC。系统按固定 ID 校验返回行数，并保留原始行时间与逐字时间；仍需人工检查后点击“采用此歌词”或“保存歌词”。
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card shadow-sm my-4" id="magicpush">
+        <div class="card-header bg-white d-flex flex-wrap align-items-center justify-content-between gap-2">
+          <span class="fw-semibold">MagicPush 整理通知</span>
+          <span class="badge {% if magicpush_token_saved %}text-bg-success{% else %}text-bg-danger{% endif %}">
+            token {% if magicpush_token_saved %}已保存{% else %}未保存{% endif %}
+          </span>
+        </div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-3">
+              <label class="form-label" for="magicpushEnabled">通知状态</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="magicpush_enabled" id="magicpushEnabled" {% if magicpush.enabled %}checked{% endif %}>
+                <label class="form-check-label" for="magicpushEnabled">启用任务结果推送</label>
+              </div>
+              <div class="form-text">任务结束时推送整理结果。</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">MagicPush 服务地址</label>
+              <input class="form-control font-monospace" name="magicpush_base_url" value="{{ magicpush.base_url }}" placeholder="http://127.0.0.1:818">
+              <div class="form-text">可以填写服务根地址或完整的 <code>/api/push/</code> 地址。</div>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">超时秒数</label>
+              <input class="form-control" type="number" min="3" max="30" name="magicpush_timeout" value="{{ magicpush.timeout or 10 }}">
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">标题前缀</label>
+              <input class="form-control" name="magicpush_title" value="{{ magicpush.title or 'Music Organizer' }}">
+            </div>
+            <div class="col-md-7">
+              <label class="form-label">Bearer token</label>
+              <input class="form-control font-monospace" type="password" name="magicpush_token" autocomplete="new-password" placeholder="{% if magicpush_token_saved %}已保存；留空保持不变{% else %}请输入 token{% endif %}">
+              <div class="form-text">token 只写入受限 secret 文件，页面和配置 YAML 都不会回显。</div>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label" for="magicpushNotifyNoChanges">空任务通知</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="magicpush_notify_no_changes" id="magicpushNotifyNoChanges" {% if magicpush.notify_no_changes %}checked{% endif %}>
+                <label class="form-check-label" for="magicpushNotifyNoChanges">qB 无新增任务时也推送</label>
+              </div>
+              <div class="form-text">开启后，定时空轮询也会发送通知。</div>
+            </div>
+            <div class="col-md-7 d-flex align-items-end justify-content-md-end gap-2">
+              <span class="form-text">测试使用已保存的地址和 token。</span>
+              <button class="btn btn-outline-secondary" id="magicpushTestButton" type="button">发送测试推送</button>
+            </div>
+          </div>
+          <div id="magicpushTestResult" class="alert mt-3 mb-0 d-none" role="status"></div>
+          <div class="form-text mt-3">
+            任务消息包含成功/失败状态、种子名称、专辑目录、扫描/整理/跳过/失败数量。默认跳过没有新种子的定时空轮询。
+          </div>
+        </div>
+      </div>
+
+      <div class="card shadow-sm my-4">
+        <div class="card-header bg-white fw-semibold">定时扫描、日志与 QB 联动</div>
+        <div class="card-body">
+          <div class="row g-3 mb-3">
+            <div class="col-md-4">
+              <label class="form-label">Cron</label>
+              <input class="form-control font-monospace" name="schedule_cron" value="{{ config.schedule.cron }}">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" for="scheduleEnabled">调度状态</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="schedule_enabled" id="scheduleEnabled" {% if config.schedule.enabled %}checked{% endif %}>
+                <label class="form-check-label" for="scheduleEnabled">启用定时扫描</label>
+              </div>
+              <div class="form-text">按 Cron 规则触发定时检查。</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">进度日志间隔</label>
+              <input class="form-control" type="number" min="50" name="progress_interval" value="{{ config.logging.progress_interval }}">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label" for="verboseFileActions">日志明细</label>
+              <div class="settings-check-control">
+                <input class="form-check-input" type="checkbox" name="verbose_file_actions" id="verboseFileActions" {% if config.logging.verbose_file_actions %}checked{% endif %}>
+                <label class="form-check-label" for="verboseFileActions">记录每个文件动作</label>
+              </div>
+              <div class="form-text">开启后记录每个文件的具体动作。</div>
+            </div>
+          </div>
+          <div class="form-text">启用主动检查后，定时任务会登录 qBittorrent，发现新完成的音乐种子后自动整理。</div>
+        </div>
+      </div>
+
+      <div class="d-flex justify-content-end mb-5">
+        <button class="btn btn-primary" type="submit">保存配置</button>
+      </div>
+    </form>
+      </div>
+    </main>
+  </div>
+  <script>
+    document.getElementById('magicpushTestButton').addEventListener('click', async () => {
+      const button = document.getElementById('magicpushTestButton')
+      const result = document.getElementById('magicpushTestResult')
+      const csrf = document.querySelector('input[name="csrf_token"]').value
+      button.disabled = true
+      result.className = 'alert alert-secondary mt-3 mb-0'
+      result.textContent = '正在发送测试消息…'
+      try {
+        const response = await fetch('/api/notifications/magicpush/test', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Accept': 'application/json',
+            'X-CSRF-Token': csrf,
+          },
+        })
+        const payload = await response.json()
+        if (!response.ok) throw new Error(payload.error || 'MagicPush 测试失败')
+        result.className = 'alert alert-success mt-3 mb-0'
+        result.textContent = payload.message || 'MagicPush 测试消息已发送'
+      } catch (error) {
+        result.className = 'alert alert-danger mt-3 mb-0'
+        result.textContent = error.message
+      } finally {
+        button.disabled = false
+      }
+    })
+  </script>
+</body>
+</html>

@@ -1,0 +1,127 @@
+paths_mapping:
+  '/media/incoming/music': '/media/library/music'
+
+mode: hardlink
+
+keep_dir_struct: true
+mkdir_if_single: true
+
+include:
+  globs: []
+  exts:
+    - '.flac'
+    - '.wav'
+    - '.ape'
+    - '.m4a'
+    - '.aac'
+    - '.ogg'
+    - '.opus'
+    - '.dsf'
+    - '.dff'
+    - '.wv'
+    - '.tta'
+    - '.alac'
+    - '.cue'
+    - '.jpg'
+    - '.jpeg'
+    - '.png'
+    - '.webp'
+    - '.bmp'
+
+exclude:
+  globs:
+    - '**/Scans/**'
+    - '**/scans/**'
+    - '**/scan/**'
+    - '**/Scan/**'
+    - '**/BK/**'
+    - '**/BD_ROM/**'
+    - '**/bk/**'
+    - '**/CD Bonus/**'
+    - '**/BD/**'
+    - '**/bd/**'
+    - '**/SCAN/**'
+  exts:
+    - '.iso'
+    - '.mp3'
+    - '.log'
+    - '.!qB'
+
+cue_split:
+  enabled: true
+  output_subdir: ''
+  filename_template: '{track:02d} - {title}'
+  skip_existing: true
+  split_multifile_cues: false
+  skip_source_audio: true
+  ffmpeg_path: ffmpeg
+  flac_compression_level: 6
+
+qbittorrent:
+  enabled: false
+  base_url: http://127.0.0.1:8082
+  username: ''
+  password_file: '/app/data/secrets/qbittorrent_password'
+  api_key_file: '/app/data/secrets/qbittorrent_api_key'
+  timeout: 10
+  min_completion_age_seconds: 60
+  scan_mode: torrent_paths
+  poll_mode: sync
+  category: ''
+  tag: ''
+  retry_max_attempts: 5
+  retry_base_seconds: 60
+  retry_max_seconds: 3600
+
+schedule:
+  cron: '*/30 * * * *'
+  enabled: true
+
+logging:
+  verbose_file_actions: false
+  progress_interval: 500
+
+review:
+  enabled: false
+  source_roots:
+    - '/media/incoming/music'
+  identify_workers: 3
+  poll_seconds: 1
+  import_timeout_seconds: 3600
+  auto_discover: true
+  discovery_interval_seconds: 15
+  discovery_stable_seconds: 60
+  proxy_url: ''
+  proxy_username: ''
+  proxy_password_file: '/app/data/secrets/review_proxy_password'
+  directory: '/media/library/music'
+  recycle_directory: '/media/#recycle/music-organizer'
+  library: '/app/data/review-beets-library.db'
+  config_path: '/app/data/review-beets-config.yaml'
+  path_format: $album_dir/%if{$albumartist,$album/}$disc_prefix$track_prefix$picard_multiartist_prefix$title
+  import_mode: hardlink
+  write_tags: false
+  move_extra_files: false
+  extra_file_patterns:
+    - '*.jpg'
+    - '*.png'
+  cleanup_source_after_import: false
+
+translation:
+  enabled: false
+  base_url: 'https://api.deepseek.com'
+  model: 'deepseek-v4-flash'
+  api_key_file: '/app/data/secrets/lyrics_translation_api_key'
+  target_language: '简体中文'
+  style: natural
+  timeout: 120
+
+notifications:
+  magicpush:
+    enabled: false
+    base_url: 'http://127.0.0.1:818'
+    token_file: '/run/secrets/magicpush/token'
+    title: 'Music Organizer'
+    type: text
+    timeout: 10
+    notify_no_changes: false

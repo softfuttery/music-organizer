@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Local runtime and deployment data
+config.yaml
+config/config.yaml
+config/.*.lock
+data/
+beets-flask-test/
+*.sqlite3
+*.sqlite3-*
+*.log
+.codex/
+.env
+.env.*
+secrets/*
+!secrets/README.md
+frontend-vue/node_modules/
+frontend-vue/dist/

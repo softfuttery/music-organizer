@@ -1,0 +1,105 @@
+:root {
+  --font-sans: "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 18px;
+  --control-height: 40px;
+  --control-radius: 10px;
+  --touch-size: 44px;
+}
+
+html {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+
+body,
+button,
+input,
+select,
+textarea {
+  font-family: var(--font-sans);
+}
+
+body {
+  font-size: var(--text-md);
+}
+
+button,
+input,
+select,
+textarea {
+  font-size: var(--text-sm);
+}
+
+button {
+  font-weight: 650;
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+select {
+  min-height: var(--control-height);
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+}
+
+/* Shared action controls. Content rows and lyric lines intentionally retain
+   their own layout while using the same typography. */
+:is(
+  .button,
+  .auth-submit,
+  .review-primary,
+  .skip-button,
+  .search-row button,
+  .manual-import-entry button,
+  .decision-bar button,
+  .lyrics-query button,
+  .lyrics-actions button,
+  .library-toolbar button,
+  .library-list-heading button,
+  .library-primary,
+  .library-secondary,
+  .lyrics-source-row button,
+  .library-danger-zone button,
+  .trash-drawer article button
+) {
+  min-height: var(--control-height);
+  border-radius: var(--control-radius);
+  padding: 0 14px;
+  font-size: var(--text-sm);
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+:is(.icon-button, .review-icon, .library-icon, .side-account button) {
+  width: var(--control-height);
+  min-width: var(--control-height);
+  height: var(--control-height);
+  padding: 0;
+}
+
+:is(.eyebrow, .breadcrumb, .side-label) {
+  font-size: var(--text-xs);
+}
+
+@media (max-width: 900px), (pointer: coarse) {
+  :root {
+    --control-height: var(--touch-size);
+  }
+
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    touch-action: manipulation;
+  }
+}

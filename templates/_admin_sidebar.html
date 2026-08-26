@@ -1,0 +1,37 @@
+<aside class="admin-sidebar">
+  <a class="admin-brand" href="/">
+    <span class="admin-brand-mark" aria-hidden="true">♪</span>
+    <span>Music Organizer</span>
+  </a>
+
+  <section class="admin-side-section">
+    <span class="admin-side-label">工作区</span>
+    <nav aria-label="主导航">
+      <a class="{% if active_page == 'overview' %}active{% endif %}" href="/">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        概览
+      </a>
+      <a class="{% if active_page == 'review' %}active{% endif %}" href="/review">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/></svg>
+        音乐预审
+      </a>
+      <a class="{% if active_page == 'library' %}active{% endif %}" href="/library">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v13a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 18.5v-13Z"/><path d="M8 7h8M8 11h8M8 15h5"/></svg>
+        音乐库
+      </a>
+      <a class="{% if active_page == 'history' %}active{% endif %}" href="/history">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>
+        历史记录
+      </a>
+      <a class="{% if active_page == 'config' %}active{% endif %}" href="/config">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V21h-4v-.08A1.7 1.7 0 0 0 8.97 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.52-1H3v-4h.08A1.7 1.7 0 0 0 4.6 8.97a1.7 1.7 0 0 0-.34-1.88l-.06-.06L7.03 4.2l.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.08V3h4v.08a1.7 1.7 0 0 0 1.03 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+        配置
+      </a>
+    </nav>
+  </section>
+
+  <div class="admin-side-account">
+    <span class="admin-avatar">{{ (session.get('username') or 'A')[0] | upper }}</span>
+    <div><strong>{{ session.get('username') or 'admin' }}</strong><span>Administrator</span></div>
+  </div>
+</aside>

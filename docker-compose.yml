@@ -1,0 +1,136 @@
+name: music-organizer
+
+x-app-image: &app-image
+  image: music-organizer:${APP_IMAGE_TAG:-dev}
+  build:
+    context: .
+    # The LAN DNS proxy may return an unroutable Fake-IP inside BuildKit.
+    # Keep the official npm and PyPI registries reachable while allowing
+    # deployments to refresh their CDN addresses through .env.
+    extra_hosts:
+      - "registry.npmjs.org:${NPM_REGISTRY_IP:-104.16.1.34}"
+      - "pypi.org:${PYPI_ORG_IP:-151.101.0.223}"
+      - "files.pythonhosted.org:${PYTHONHOSTED_IP:-151.101.0.223}"
+    args:
+      SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
+      APP_UID: ${APP_UID:-1026}
+      APP_GID: ${APP_GID:-100}
+
+services:
+  web:
+    <<: *app-image
+    container_name: music-organizer-web
+    restart: always
+    stop_grace_period: 30s
+    user: "${APP_UID:-1026}:${APP_GID:-100}"
+    # Synology protects a shared folder's #recycle directory with the
+    # administrators ACL. Add only that supplementary group to the web
+    # process, which handles the explicit "move to recycle bin" action.
+    group_add:
+      - "${DSM_RECYCLE_GID:-101}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "10.0.0.5:${PORT:-15000}:${PORT:-15000}"
+    command: >-
+      sh -c "gunicorn -w ${WORKERS:-1} --worker-class gthread --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-120} -b 0.0.0.0:${PORT:-15000} app:app"
+    environment:
+      TZ: Asia/Hong_Kong
+      CONFIG_PATH: /app/config/config.yaml
+      DATABASE_PATH: /app/data/organizer.sqlite3
+      LOG_PATH: /app/data/organizer.log
+      PORT: ${PORT:-15000}
+      WORKERS: ${WORKERS:-1}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+      AUTH_PASSWORD_HASH_FILE: /run/secrets/auth_password
+      SECRET_KEY_PATH: /run/secrets/flask_secret_key
+      MAGICPUSH_TOKEN_FILE: /run/secrets/magicpush/token
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      WORKER_HEARTBEAT_MAX_AGE_SECONDS: 30
+    volumes:
+      - ${MEDIA_ROOT:-/volume2}:/volume2
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./secrets/auth_password:/run/secrets/auth_password:ro
+      - ./secrets/flask_secret_key:/run/secrets/flask_secret_key:ro
+      - ./secrets/magicpush:/run/secrets/magicpush
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '15000') + '/api/health?component=web', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  worker:
+    <<: *app-image
+    container_name: music-organizer-worker
+    restart: always
+    stop_grace_period: 60s
+    user: "${APP_UID:-1026}:${APP_GID:-100}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # qBittorrent currently listens on the NAS host address. Keep only this
+    # service on host networking until its URL is migrated to host-gateway.
+    network_mode: host
+    command: ["python", "worker.py"]
+    environment:
+      TZ: Asia/Hong_Kong
+      CONFIG_PATH: /app/config/config.yaml
+      DATABASE_PATH: /app/data/organizer.sqlite3
+      LOG_PATH: /app/data/organizer.log
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      WORKER_POLL_SECONDS: 1
+      WORKER_HEARTBEAT_MAX_AGE_SECONDS: 30
+      MAGICPUSH_TOKEN_FILE: /run/secrets/magicpush/token
+    volumes:
+      - ${MEDIA_ROOT:-/volume2}:/volume2
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./secrets/magicpush:/run/secrets/magicpush:ro
+    healthcheck:
+      test: ["CMD", "python", "worker.py", "--health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  review-worker:
+    <<: *app-image
+    container_name: music-organizer-review-worker
+    restart: always
+    stop_grace_period: 60s
+    user: "${APP_UID:-1026}:${APP_GID:-100}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["python", "review_worker.py"]
+    # The LAN DNS proxy may return a Fake-IP that Docker cannot route. Keep the
+    # address override configurable because MusicBrainz can change its origin.
+    extra_hosts:
+      - "musicbrainz.org:${MUSICBRAINZ_IP:-142.132.241.153}"
+    environment:
+      TZ: Asia/Hong_Kong
+      CONFIG_PATH: /app/config/config.yaml
+      DATABASE_PATH: /app/data/organizer.sqlite3
+      LOG_PATH: /app/data/organizer.log
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      WORKER_HEARTBEAT_MAX_AGE_SECONDS: 30
+      REVIEW_IMPORT_TIMEOUT_SECONDS: ${REVIEW_IMPORT_TIMEOUT_SECONDS:-}
+    volumes:
+      - ${MEDIA_ROOT:-/volume2}:/volume2
+      - ./config:/app/config
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "review_worker.py", "--health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

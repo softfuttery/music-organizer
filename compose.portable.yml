@@ -1,0 +1,97 @@
+name: music-organizer
+
+x-app-image: &app-image
+  image: ${DOCKER_IMAGE:-music-organizer}:${APP_IMAGE_TAG:-dev}
+  build:
+    context: .
+    args:
+      SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
+      SOURCE_URL: ${SOURCE_URL:-https://github.com/OWNER/music-organizer}
+      APP_UID: ${APP_UID:-1026}
+      APP_GID: ${APP_GID:-100}
+
+x-app-common: &app-common
+  <<: *app-image
+  restart: unless-stopped
+  user: "${APP_UID:-1026}:${APP_GID:-100}"
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  environment: &app-environment
+    TZ: ${TZ:-Asia/Shanghai}
+    CONFIG_PATH: /app/config/config.yaml
+    DATABASE_PATH: /app/data/organizer.sqlite3
+    LOG_PATH: /app/data/organizer.log
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    WORKER_HEARTBEAT_MAX_AGE_SECONDS: 30
+  volumes: &app-volumes
+    - ${MEDIA_ROOT:-./media}:/media
+    - ${CONFIG_DIR:-./config}:/app/config
+    - ${DATA_DIR:-./data}:/app/data
+
+services:
+  web:
+    <<: *app-common
+    stop_grace_period: 30s
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-15000}:${PORT:-15000}"
+    command: >-
+      sh -c "gunicorn -w ${WORKERS:-1} --worker-class gthread --threads ${GUNICORN_THREADS:-4} --timeout ${GUNICORN_TIMEOUT:-120} -b 0.0.0.0:${PORT:-15000} app:app"
+    environment:
+      <<: *app-environment
+      PORT: ${PORT:-15000}
+      WORKERS: ${WORKERS:-1}
+      GUNICORN_THREADS: ${GUNICORN_THREADS:-4}
+      GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+      AUTH_USERNAME: ${AUTH_USERNAME:-admin}
+      AUTH_PASSWORD_HASH_FILE: /run/secrets/auth_password
+      SECRET_KEY_PATH: /run/secrets/flask_secret_key
+      MAGICPUSH_TOKEN_FILE: /run/secrets/magicpush/token
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+    volumes:
+      - ${MEDIA_ROOT:-./media}:/media
+      - ${CONFIG_DIR:-./config}:/app/config
+      - ${DATA_DIR:-./data}:/app/data
+      - ${SECRETS_DIR:-./secrets}/auth_password:/run/secrets/auth_password:ro
+      - ${SECRETS_DIR:-./secrets}/flask_secret_key:/run/secrets/flask_secret_key:ro
+      - ${SECRETS_DIR:-./secrets}/magicpush:/run/secrets/magicpush
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PORT', '15000') + '/api/health?component=web', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  worker:
+    <<: *app-common
+    stop_grace_period: 60s
+    command: ["python", "worker.py"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      <<: *app-environment
+      WORKER_POLL_SECONDS: 1
+      MAGICPUSH_TOKEN_FILE: /run/secrets/magicpush/token
+    volumes:
+      - ${MEDIA_ROOT:-./media}:/media
+      - ${CONFIG_DIR:-./config}:/app/config
+      - ${DATA_DIR:-./data}:/app/data
+      - ${SECRETS_DIR:-./secrets}/magicpush:/run/secrets/magicpush:ro
+    healthcheck:
+      test: ["CMD", "python", "worker.py", "--health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  review-worker:
+    <<: *app-common
+    stop_grace_period: 60s
+    command: ["python", "review_worker.py"]
+    healthcheck:
+      test: ["CMD", "python", "review_worker.py", "--health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
