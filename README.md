@@ -12,7 +12,7 @@ Music Organizer 是一个基于 Flask、SQLite 和 Vue 3 的音乐整理服务�
 仓库中的 [docker-compose.yml](docker-compose.yml) 默认使用公开镜像：
 
 ```text
-softfuttery/music-organizer:1.8.0
+softfuttery/music-organizer:1.8.1
 ```
 
 最简启动流程：
@@ -65,7 +65,7 @@ mode: hardlink
 
 - Docker Hub: https://hub.docker.com/r/softfuttery/music-organizer
 - GitHub: https://github.com/softfuttery/music-organizer
-- 当前稳定标签：`1.8.0`
+- 当前稳定标签：`1.8.1`
 - 当前镜像平台：`linux/amd64`
 
 ## 安全提示
