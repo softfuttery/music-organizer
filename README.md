@@ -30,28 +30,6 @@ mkdir -p config data
 cp config/config.example.yaml config/config.yaml
 ```
 
-## 源码真相与发布边界
-
-Git 的 `main` 分支及其 `origin/main` 是唯一源码真相。NAS 上
-`/volume4/docker/music-organizer` 只是某个已提交版本的发布副本，不应直接修改后再反向覆盖仓库。
-每个镜像都写入完整 Git 提交号，并通过 `/api/health` 返回
-`source_revision`，便于把线上容器追溯到源码。
-
-发布前要求工作树干净，并给 Web 和 Worker 使用同一个提交标签：
-
-```bash
-git diff --quiet
-git diff --cached --quiet
-export SOURCE_REVISION="$(git rev-parse HEAD)"
-export APP_IMAGE_TAG="$(git rev-parse --short=12 HEAD)"
-docker compose build web
-docker compose up -d --no-deps --force-recreate web worker review-worker
-```
-
-`web`、`worker` 和 `review-worker` 通过同一个 Compose build anchor 生成同一
-`music-organizer:${APP_IMAGE_TAG}` 镜像。因此可以定向构建其中任意一个服务，但更新共享 tag 后必须
-同时重建三个容器，不能只重建被选中的服务；否则未重建的容器仍会持有旧 image ID。
-
 ## Docker Compose 部署
 
 默认 `docker-compose.yml` 包含同镜像的三个角色，不会修改现有 qBittorrent：
