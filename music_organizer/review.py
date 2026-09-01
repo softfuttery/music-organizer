@@ -6,7 +6,6 @@ not block qBittorrent polling or the existing organizer worker.
 
 from __future__ import annotations
 
-import filecmp
 import fnmatch
 import hashlib
 import json
@@ -21,12 +20,18 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Sequence
 
+from .database import schema_upgrade
+from .file_compare import stable_regular_files_equal
 from .lyrics import normalize_lyric_decision
+from .pathsafe import mkdir_confined, resolve_confined
 
 AUDIO_EXTENSIONS = {
     ".aac", ".aiff", ".alac", ".ape", ".dff", ".dsf", ".flac",
     ".m4a", ".mp3", ".ogg", ".opus", ".tta", ".wav", ".wv",
 }
+
+AUTO_DISCOVERY_MAX_BATCH_ITEMS = 100
+AUTO_DISCOVERY_MAX_PENDING_ITEMS = 100
 
 
 class ActiveReviewOverlapError(ValueError):
@@ -68,53 +73,37 @@ def utc_now() -> str:
 
 def ensure_within_roots(path: str | Path, roots: Sequence[str | Path]) -> Path:
     """Resolve *path* and reject values outside configured review roots."""
-    resolved = Path(path).expanduser().resolve(strict=True)
-    if not resolved.is_dir():
-        raise ValueError(f"预审路径不是目录: {resolved}")
-    allowed = [Path(root).expanduser().resolve(strict=True) for root in roots]
-    if not any(resolved == root or resolved.is_relative_to(root) for root in allowed):
-        raise ValueError(f"预审路径不在允许范围内: {resolved}")
-    return resolved
+    for root in roots:
+        try:
+            return resolve_confined(
+                Path(root).expanduser(),
+                Path(path).expanduser(),
+                kind="directory",
+                label="预审路径",
+            )
+        except ValueError:
+            continue
+    raise ValueError(f"预审路径不在允许范围内: {path}")
 
 
 def _mkdir_confined(root: Path, parts: Sequence[str]) -> Path:
     """Create a directory path without following an existing symlink component."""
-    resolved_root = root.resolve(strict=True)
-    current = resolved_root
-    for part in parts:
-        if part in {"", ".", ".."}:
-            raise ValueError("隔离目录包含不安全路径")
-        candidate = current / part
-        if candidate.is_symlink():
-            raise ValueError("隔离目录不能包含符号链接")
-        candidate.mkdir(exist_ok=True)
-        current = candidate.resolve(strict=True)
-        if not current.is_dir() or not current.is_relative_to(resolved_root):
-            raise ValueError("隔离目录超出允许范围")
-    return current
+    try:
+        return mkdir_confined(root, parts, label="隔离目录")
+    except ValueError as exc:
+        if "symlink" in str(exc):
+            raise ValueError("隔离目录不能包含符号链接") from exc
+        raise
 
 
 def _confined_regular_file(root: Path, candidate: Path) -> Path | None:
     """Resolve a regular file below *root* without traversing symlinks."""
-    resolved_root = root.resolve(strict=True)
     try:
-        relative = candidate.relative_to(resolved_root)
-    except ValueError as exc:
-        raise ValueError("文件超出允许范围") from exc
-    current = resolved_root
-    for part in relative.parts:
-        if part in {"", ".", ".."}:
-            raise ValueError("文件包含不安全路径")
-        current = current / part
-        if current.is_symlink():
-            raise ValueError("文件路径不能包含符号链接")
-    try:
-        resolved = current.resolve(strict=True)
-    except FileNotFoundError:
-        return None
-    if not resolved.is_file() or not resolved.is_relative_to(resolved_root):
-        raise ValueError("文件超出允许范围或不是普通文件")
-    return resolved
+        return resolve_confined(root, candidate, kind="file", label="文件")
+    except ValueError:
+        if not os.path.lexists(candidate):
+            return None
+        raise ValueError("文件路径不能包含符号链接或超出允许范围")
 
 
 FileIdentity = tuple[int, int, int, int, int, int]
@@ -170,21 +159,20 @@ def _matches_guard_identity(
 
 def _confined_output_file(root: Path, relative: Path) -> Path:
     """Return an output path whose existing components stay below *root*."""
-    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
-        raise ValueError("输出文件包含不安全路径")
-    resolved_root = root.resolve(strict=True)
-    parent = _mkdir_confined(resolved_root, relative.parts[:-1])
-    output = parent / relative.name
-    if output.is_symlink():
-        raise ValueError("输出文件不能是符号链接")
     try:
-        resolved_output = output.resolve(strict=output.exists())
-    except (OSError, RuntimeError) as exc:
-        raise ValueError("输出文件路径无效") from exc
-    if not resolved_output.is_relative_to(resolved_root):
-        raise ValueError("输出文件超出入库目标范围")
-    if output.exists() and not resolved_output.is_file():
-        raise ValueError("输出目标不是普通文件")
+        output = resolve_confined(
+            root,
+            relative,
+            must_exist=False,
+            create_parent=True,
+            label="输出文件",
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "输出文件不能包含符号链接或超出入库目标范围"
+        ) from exc
+    if output.exists():
+        return resolve_confined(root, output, kind="file", label="输出文件")
     return output
 
 
@@ -226,6 +214,34 @@ def audio_files(path: Path) -> list[Path]:
                 continue
             if resolved.is_file() and resolved.is_relative_to(root):
                 files.append(candidate)
+    return sorted(files)
+
+
+def auxiliary_files(path: Path) -> list[str]:
+    """Return portable non-audio file paths without following symlinks."""
+    if path.is_symlink():
+        return []
+    try:
+        root = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return []
+    if not root.is_dir():
+        return []
+
+    files: list[str] = []
+    for current_root, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(current_root)
+        dirnames[:] = [
+            name for name in dirnames if not (current / name).is_symlink()
+        ]
+        for filename in filenames:
+            candidate = current / filename
+            if (
+                candidate.is_symlink()
+                or candidate.suffix.lower() in AUDIO_EXTENSIONS
+            ):
+                continue
+            files.append(candidate.relative_to(root).as_posix())
     return sorted(files)
 
 
@@ -457,8 +473,8 @@ def finalize_review_import(
                 continue
             output_relative = Path(relative.name) if flatten_extra_files else relative
             output = _confined_output_file(destination, output_relative)
-            if output.exists() and not filecmp.cmp(
-                safe_original, output, shallow=False
+            if output.exists() and not stable_regular_files_equal(
+                safe_original, output
             ):
                 suffix = 1
                 while True:
@@ -636,7 +652,15 @@ class ReviewRepository:
             conn.close()
 
     def initialize(self) -> None:
-        with self._connection() as conn:
+        with (
+            schema_upgrade(
+                self.database_path,
+                "review",
+                1,
+                ("review_batches", "review_items", "review_queue"),
+            ),
+            self._connection() as conn,
+        ):
             conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(
                 """
@@ -845,10 +869,15 @@ class ReviewRepository:
         self,
         entries: Sequence[tuple[Path, str]],
         label: str = "自动发现新音乐",
+        *,
+        max_batch_items: int = AUTO_DISCOVERY_MAX_BATCH_ITEMS,
+        max_pending_items: int = AUTO_DISCOVERY_MAX_PENDING_ITEMS,
     ) -> dict[str, Any] | None:
-        """Atomically enqueue new or changed album directories."""
+        """Atomically enqueue a bounded set of new or changed album directories."""
         if not entries:
             return None
+        max_batch_items = max(1, int(max_batch_items))
+        max_pending_items = max(1, int(max_pending_items))
         collapsed_entries: list[tuple[Path, str]] = []
         for raw_path, signature in entries:
             path = _review_path(raw_path)
@@ -867,6 +896,20 @@ class ReviewRepository:
         batch_id = 0
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            pending_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM review_queue
+                    WHERE action = 'identify' AND status IN ('queued', 'running')
+                    """
+                ).fetchone()[0]
+            )
+            available_slots = min(
+                max_batch_items,
+                max_pending_items - pending_count,
+            )
+            if available_slots <= 0:
+                return None
             eligible: list[tuple[Path, str]] = []
             active_paths = [
                 _review_path(row["source_path"])
@@ -889,6 +932,8 @@ class ReviewRepository:
                 if latest is not None and latest["source_signature"] == signature:
                     continue
                 eligible.append((path, signature))
+                if len(eligible) >= available_slots:
+                    break
             if not eligible:
                 return None
             cursor = conn.execute(
@@ -967,6 +1012,7 @@ class ReviewRepository:
         limit: int = 30,
         scope: str = "active",
         query: str = "",
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         scope_filter = self._scope_filter(scope)
         search_filter, search_params = self._search_filter(query)
@@ -984,17 +1030,40 @@ class ReviewRepository:
                     AND {scope_filter} AND {search_filter}
                 GROUP BY b.id
                 ORDER BY b.id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (*search_params, max(1, min(limit, 100))),
+                (
+                    *search_params,
+                    max(1, min(limit, 100)),
+                    max(0, int(offset)),
+                ),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def batch_count(self, scope: str = "active", query: str = "") -> int:
+        scope_filter = self._scope_filter(scope)
+        search_filter, search_params = self._search_filter(query)
+        with self._connection() as conn:
+            return int(
+                conn.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT b.id)
+                    FROM review_batches b
+                    JOIN review_items i ON i.batch_id = b.id
+                        AND {scope_filter} AND {search_filter}
+                    """,
+                    search_params,
+                ).fetchone()[0]
+            )
 
     def batch(
         self,
         batch_id: int,
         scope: str = "all",
         query: str = "",
+        *,
+        offset: int = 0,
+        limit: int | None = None,
     ) -> dict[str, Any]:
         scope_filter = self._scope_filter(scope, alias="review_items")
         search_filter, search_params = self._search_filter(
@@ -1006,14 +1075,42 @@ class ReviewRepository:
             ).fetchone()
             if batch is None:
                 raise KeyError(f"预审批次不存在: {batch_id}")
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM review_items "
+                    f"WHERE batch_id = ? AND {scope_filter} AND {search_filter}",
+                    (batch_id, *search_params),
+                ).fetchone()[0]
+            )
+            effective_limit = None if limit is None else max(1, min(int(limit), 100))
+            effective_offset = max(0, int(offset))
+            if effective_limit is not None and total:
+                effective_offset = min(
+                    effective_offset,
+                    ((total - 1) // effective_limit) * effective_limit,
+                )
+            pagination = ""
+            pagination_params: tuple[int, ...] = ()
+            if effective_limit is not None:
+                pagination = " LIMIT ? OFFSET ?"
+                pagination_params = (effective_limit, effective_offset)
             items = conn.execute(
                 f"SELECT * FROM review_items "
-                f"WHERE batch_id = ? AND {scope_filter} AND {search_filter} ORDER BY id",
-                (batch_id, *search_params),
+                f"WHERE batch_id = ? AND {scope_filter} AND {search_filter} "
+                f"ORDER BY id{pagination}",
+                (batch_id, *search_params, *pagination_params),
             ).fetchall()
         payload = dict(batch)
         payload["scope"] = scope
         payload["items"] = [self._item_payload(row) for row in items]
+        returned_limit = effective_limit if effective_limit is not None else max(total, 1)
+        payload["pagination"] = {
+            "total": total,
+            "offset": effective_offset,
+            "limit": returned_limit,
+            "has_previous": effective_offset > 0,
+            "has_next": effective_offset + len(items) < total,
+        }
         return payload
 
     def delete_archived_item(self, item_id: int) -> dict[str, int | bool]:
@@ -1453,7 +1550,7 @@ class ReviewRepository:
                     json.dumps(
                         {
                             "outcome": "source_recycled",
-                            "message": "用户选择不入库，源专辑目录已移入回收目录",
+                            "message": "用户选择不入库，源专辑目录已移入预审回收站",
                             "recycle_destination": str(destination),
                         },
                         ensure_ascii=False,

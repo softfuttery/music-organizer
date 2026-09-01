@@ -76,6 +76,10 @@ export function getStats() {
   return request('/api/stats')
 }
 
+export function getDashboard() {
+  return request('/api/dashboard')
+}
+
 export function getJob() {
   return request('/api/job')
 }
@@ -128,14 +132,14 @@ export function getReviewAudioUrl(itemId, localPath) {
   return `/api/review/items/${itemId}/audio?path=${encodeURIComponent(localPath)}`
 }
 
-export function getReviewBatches(scope = 'active', query = '') {
-  const params = new URLSearchParams({ scope })
+export function getReviewBatches(scope = 'active', query = '', offset = 0, limit = 30) {
+  const params = new URLSearchParams({ scope, offset: String(offset), limit: String(limit) })
   if (query) params.set('q', query)
   return request('/api/review/batches?' + params)
 }
 
-export function getReviewBatch(id, scope = 'active', query = '') {
-  const params = new URLSearchParams({ scope })
+export function getReviewBatch(id, scope = 'active', query = '', offset = 0, limit = 20) {
+  const params = new URLSearchParams({ scope, offset: String(offset), limit: String(limit) })
   if (query) params.set('q', query)
   return request('/api/review/batches/' + id + '?' + params)
 }

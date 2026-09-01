@@ -9,6 +9,25 @@
   --control-height: 40px;
   --control-radius: 10px;
   --touch-size: 44px;
+  --workspace-overlay: rgb(15 15 13 / 48%);
+  --workspace-drawer: var(--surface-muted);
+  --workspace-panel: var(--surface);
+  --workspace-control: var(--surface);
+  --workspace-control-muted: var(--surface-muted);
+  --workspace-border: var(--line-strong);
+  --workspace-text: var(--ink);
+  --workspace-text-muted: var(--muted);
+  --workspace-shadow: 0 5px 16px rgb(24 25 22 / 8%);
+  --workspace-drawer-shadow: -20px 0 70px rgb(0 0 0 / 20%);
+  --workspace-warning-text: #834c18;
+  --workspace-warning-border: #efc7a1;
+  --workspace-warning-bg: #fff6eb;
+  --workspace-info-text: #4f647a;
+  --workspace-info-bg: #eef4fa;
+  --workspace-success-text: #25633c;
+  --workspace-success-bg: #eff9f2;
+  --workspace-error-text: #9c342f;
+  --workspace-error-bg: #fff2f1;
 }
 
 html {

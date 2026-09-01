@@ -6,12 +6,18 @@ import argparse
 import json
 import os
 import shutil
-import stat
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Sequence
 
 from .beets_review import _track_aliases, _track_key
+from .file_compare import stable_regular_files_equal
+from .pathsafe import (
+    reject_symlink_components,
+    resolve_confined,
+    resolve_root,
+)
+from .source_guard import parse_source_guard, source_identity_snapshot
 
 
 def duplicate_action_for_release(
@@ -164,111 +170,56 @@ class ApprovedImportSession:
 
 
 def _reject_symlink_components(path: Path, label: str) -> None:
-    absolute = path.absolute()
-    current = Path(absolute.anchor)
-    for part in absolute.parts[1:]:
-        if part in {"", ".", ".."}:
-            raise ValueError(f"{label}包含不安全路径: {path}")
-        current = current / part
-        if current.is_symlink():
-            raise ValueError(f"{label}不能包含符号链接: {current}")
+    reject_symlink_components(path, label=label)
 
 
 def _library_root(path: str | Path, *, create: bool = False) -> Path:
-    configured = Path(os.fsdecode(path)).expanduser()
-    _reject_symlink_components(configured, "媒体库目录")
-    if create:
-        configured.mkdir(parents=True, exist_ok=True)
-        _reject_symlink_components(configured, "媒体库目录")
-    root = configured.resolve(strict=True)
-    if root != configured.absolute():
-        raise ValueError(f"媒体库目录被重定向: {configured}")
-    if not root.is_dir():
-        raise ValueError(f"媒体库目录不存在: {root}")
-    return root
+    try:
+        return resolve_root(path, create=create, label="媒体库目录")
+    except ValueError as exc:
+        if "symlink" in str(exc):
+            raise ValueError("媒体库目录不能包含符号链接") from exc
+        raise
 
 
 def _library_candidate(path: str | Path, library_root: Path) -> Path:
-    candidate = Path(os.fsdecode(path)).expanduser()
-    if not candidate.is_absolute():
-        candidate = library_root / candidate
     try:
-        relative = candidate.relative_to(library_root)
+        return resolve_confined(
+            library_root,
+            path,
+            must_exist=False,
+            label="入库目标",
+        )
     except ValueError as exc:
-        raise ValueError(f"入库目标超出媒体库目录: {candidate}") from exc
-    current = library_root
-    for part in relative.parts:
-        if part in {"", ".", ".."}:
-            raise ValueError(f"入库目标路径不安全: {candidate}")
-        current = current / part
-        if current.is_symlink():
-            raise ValueError(f"入库目标不能包含符号链接: {current}")
-    resolved = current.resolve(strict=False)
-    if not resolved.is_relative_to(library_root):
-        raise ValueError(f"入库目标超出媒体库目录: {candidate}")
-    return resolved
+        if "symlink" in str(exc):
+            raise ValueError("入库目标不能包含符号链接") from exc
+        raise ValueError(f"入库目标超出媒体库目录: {path}") from exc
 
 
 def _validated_library_file(path: str | Path, library_root: Path) -> Path:
-    candidate = _library_candidate(path, library_root)
-    if candidate.is_symlink():
-        raise ValueError(f"入库目标不能是符号链接: {candidate}")
     try:
-        resolved = candidate.resolve(strict=True)
-    except (FileNotFoundError, OSError, RuntimeError) as exc:
-        raise ValueError(f"入库目标文件不存在: {candidate}") from exc
-    if not resolved.is_relative_to(library_root) or not resolved.is_file():
-        raise ValueError(f"入库目标不是媒体库内的普通文件: {candidate}")
-    return resolved
+        return resolve_confined(
+            library_root,
+            path,
+            kind="file",
+            label="入库目标文件",
+        )
+    except ValueError as exc:
+        if "symlink" in str(exc):
+            raise ValueError("入库目标不能包含符号链接") from exc
+        if Path(os.fsdecode(path)).is_absolute():
+            raise ValueError(f"入库目标超出媒体库目录: {path}") from exc
+        raise
 
 
 def _validated_source_file(path: Path, source_root: Path) -> Path:
-    configured_root = source_root.expanduser()
-    candidate = path.expanduser()
-    if not candidate.is_absolute():
-        candidate = configured_root / candidate
-    if configured_root.is_symlink():
-        raise ValueError(f"恢复源目录不能是符号链接: {configured_root}")
     try:
-        root = configured_root.resolve(strict=True)
-    except (FileNotFoundError, OSError, RuntimeError) as exc:
-        raise ValueError(f"恢复源文件不存在: {path}") from exc
-    if not root.is_dir():
-        raise ValueError(f"恢复源目录无效: {source_root}")
-    try:
-        relative = candidate.relative_to(configured_root)
-    except ValueError:
-        try:
-            relative = candidate.relative_to(root)
-        except ValueError as exc:
-            raise ValueError(f"恢复源文件超出已确认目录: {path}") from exc
-    current = root
-    for part in relative.parts:
-        if part in {"", ".", ".."}:
-            raise ValueError(f"恢复源文件路径不安全: {path}")
-        current = current / part
-        if current.is_symlink():
-            raise ValueError(f"恢复源文件不能包含符号链接: {current}")
-    try:
-        resolved = current.resolve(strict=True)
-    except (FileNotFoundError, OSError, RuntimeError) as exc:
-        raise ValueError(f"恢复源文件不存在: {path}") from exc
-    if not resolved.is_relative_to(root) or not resolved.is_file():
-        raise ValueError(f"恢复源文件超出已确认目录: {path}")
-    return resolved
-
-
-def _files_equal(first: Path, second: Path) -> bool:
-    if first.stat().st_size != second.stat().st_size:
-        return False
-    with first.open("rb") as first_handle, second.open("rb") as second_handle:
-        while True:
-            first_chunk = first_handle.read(1024 * 1024)
-            second_chunk = second_handle.read(1024 * 1024)
-            if first_chunk != second_chunk:
-                return False
-            if not first_chunk:
-                return True
+        root = resolve_root(source_root, label="恢复源目录")
+        return resolve_confined(root, path, kind="file", label="恢复源文件")
+    except ValueError as exc:
+        if "symlink" in str(exc):
+            raise ValueError("恢复源文件不能包含符号链接") from exc
+        raise ValueError(f"恢复源文件超出已确认目录: {path}") from exc
 
 
 def _atomic_copy(source: Path, destination: Path, library_root: Path) -> None:
@@ -305,81 +256,13 @@ def _configured_import_mode(config: Any) -> str:
     raise ValueError("beets 导入方式必须是 copy、move 或 hardlink")
 
 
-SourceIdentity = tuple[int, int, int, int, int]
-
-
-def _parse_import_guard(
-    value: dict[str, Any],
-) -> tuple[tuple[int, int], dict[str, SourceIdentity]]:
-    raw_root = value.get("root")
-    raw_entries = value.get("entries")
-    if not isinstance(raw_root, list) or len(raw_root) != 2 or not isinstance(
-        raw_entries, dict
-    ):
-        raise ValueError("持久化入库源保护快照不完整")
-    try:
-        root_identity = (int(raw_root[0]), int(raw_root[1]))
-        entries: dict[str, SourceIdentity] = {}
-        for raw_path, raw_identity in raw_entries.items():
-            if not isinstance(raw_path, str) or not isinstance(
-                raw_identity, list
-            ) or len(raw_identity) != 5:
-                raise ValueError
-            relative = PurePosixPath(raw_path)
-            if (
-                not raw_path
-                or relative.is_absolute()
-                or ".." in relative.parts
-            ):
-                raise ValueError
-            entries[relative.as_posix()] = tuple(
-                int(part) for part in raw_identity
-            )  # type: ignore[assignment]
-    except (TypeError, ValueError) as exc:
-        raise ValueError("持久化入库源保护快照无效") from exc
-    if len(entries) != len(raw_entries):
-        raise ValueError("持久化入库源保护快照包含重复路径")
-    return root_identity, entries
-
-
-def _source_identity_snapshot(source_root: Path) -> dict[str, SourceIdentity]:
-    snapshot: dict[str, SourceIdentity] = {}
-    for current_root, dirnames, filenames in os.walk(
-        source_root,
-        followlinks=False,
-    ):
-        current = Path(current_root)
-        for name in (*dirnames, *filenames):
-            candidate = current / name
-            metadata = candidate.lstat()
-            file_type = stat.S_IFMT(metadata.st_mode)
-            relative = candidate.relative_to(source_root).as_posix()
-            if stat.S_ISLNK(metadata.st_mode):
-                raise ValueError(
-                    f"入库源保护快照检测到符号链接: {relative}"
-                )
-            snapshot[relative] = (
-                int(metadata.st_dev),
-                int(metadata.st_ino),
-                file_type,
-                int(metadata.st_size) if stat.S_ISREG(metadata.st_mode) else 0,
-                int(metadata.st_mtime_ns)
-                if stat.S_ISREG(metadata.st_mode)
-                else 0,
-            )
-        dirnames[:] = [
-            name for name in dirnames if not (current / name).is_symlink()
-        ]
-    return snapshot
-
-
 def _validate_import_guard(
     source_root: Path,
     import_guard: dict[str, Any],
     *,
     allowed_metadata_changes: set[str] | None = None,
 ) -> None:
-    expected_root, expected_entries = _parse_import_guard(import_guard)
+    expected_root, expected_entries = parse_source_guard(import_guard)
     if source_root.is_symlink():
         raise ValueError("入库源保护快照检测到源目录符号链接")
     try:
@@ -391,7 +274,10 @@ def _validate_import_guard(
     if current_root != expected_root:
         raise ValueError("入库源保护快照检测到源目录已被替换")
     allowed = allowed_metadata_changes or set()
-    for relative, current in _source_identity_snapshot(root).items():
+    for relative, current in source_identity_snapshot(
+        root,
+        symlink_policy="reject",
+    ).items():
         previous = expected_entries.get(relative)
         if previous is None:
             raise ValueError(
@@ -484,7 +370,7 @@ def _operation_matches_source(
 ) -> bool:
     if import_mode == "hardlink":
         return os.path.samefile(source, destination)
-    return _files_equal(source, destination)
+    return stable_regular_files_equal(source, destination)
 
 
 def _remove_moved_source(
@@ -493,7 +379,7 @@ def _remove_moved_source(
     source_root: Path,
 ) -> None:
     safe_source = _validated_source_file(source, source_root)
-    if not _files_equal(safe_source, destination):
+    if not stable_regular_files_equal(safe_source, destination):
         raise ValueError(f"move 恢复源文件与入库目标不一致: {source}")
     safe_source.unlink()
 

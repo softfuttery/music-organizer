@@ -36,10 +36,9 @@ import {
   watchSystemTheme,
 } from './theme-preferences'
 import {
+  getDashboard,
   getHealth,
-  getJob,
   getSession,
-  getStats,
   login,
   logout,
   onUnauthorized,
@@ -97,6 +96,29 @@ const webOnline = computed(
   () => health.value?.web === 'ok' || health.value?.status === 'ok',
 )
 const workerOnline = computed(() => Boolean(stats.value?.worker_running))
+const qbConnection = computed(() => stats.value?.qb_connection || {})
+const qbConnectionLabel = computed(() => {
+  const labels = {
+    ok: 'qB 连接正常',
+    failed: 'qB 连接失败',
+    unknown: 'qB 尚未检查',
+  }
+  return labels[qbConnection.value.status] || 'qB 状态未知'
+})
+const qbConnectionTone = computed(() => {
+  if (qbConnection.value.status === 'ok') return 'success'
+  if (qbConnection.value.status === 'failed') return 'danger'
+  return 'muted'
+})
+const qbConnectionDetail = computed(() => {
+  if (qbConnection.value.status === 'failed') {
+    return qbConnection.value.last_error || '未返回具体错误'
+  }
+  if (qbConnection.value.status === 'ok' && qbConnection.value.last_success_at) {
+    return `最近成功 ${qbConnection.value.last_success_at}`
+  }
+  return ''
+})
 const dashboardPollDelay = () => job.value?.running ? 3000 : 15000
 
 const jobHeadline = computed(() => {
@@ -159,14 +181,10 @@ async function refresh({ quiet = false } = {}) {
   refreshRunning = true
   if (!quiet) loading.value = true
   try {
-    const [statsData, jobData] = await Promise.all([getStats(), getJob()])
-    stats.value = statsData
-    job.value = jobData
-    try {
-      health.value = await getHealth()
-    } catch (healthError) {
-      health.value = healthError.payload || { status: 'degraded' }
-    }
+    const dashboard = await getDashboard()
+    stats.value = dashboard
+    job.value = dashboard.job_status
+    health.value = dashboard.health
     error.value = ''
   } catch (requestError) {
     if (requestError.status === 401) {
@@ -445,6 +463,16 @@ onBeforeUnmount(() => {
             <h2>{{ jobHeadline }}</h2>
             <p v-if="job?.id">任务 #{{ job.id }} · {{ jobTypeLabel }}</p>
             <p v-else>选择增量检查或全量整理，任务会安全写入持久队列。</p>
+            <div class="qb-connection" role="status" aria-live="polite">
+              <span class="job-state" :class="qbConnectionTone">
+                <i></i>{{ qbConnectionLabel }}
+              </span>
+              <span
+                v-if="qbConnectionDetail"
+                class="qb-connection-detail"
+                :title="qbConnectionDetail"
+              >{{ qbConnectionDetail }}</span>
+            </div>
           </div>
           <div class="command-actions">
             <button

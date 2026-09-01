@@ -6,6 +6,7 @@ from typing import Any
 
 from flask import Blueprint, jsonify, request, send_file
 
+from .audio_preview import AudioPreviewError, browser_compatible_audio
 from .library_manager import (
     audio_duration,
     library_file,
@@ -94,9 +95,15 @@ def create_library_blueprint(organizer: Any) -> Blueprint:
         try:
             _review, root = settings()
             path = library_file(root, request.args.get("path", ""))
-            response = send_file(path, conditional=True, max_age=300)
+            preview_path = browser_compatible_audio(
+                path,
+                organizer.database_path.parent / "preview-cache",
+            )
+            response = send_file(preview_path, conditional=True, max_age=300)
             response.headers["Cache-Control"] = "private, max-age=300"
             return response
+        except AudioPreviewError as exc:
+            return jsonify({"error": str(exc)}), 422
         except (OSError, ValueError) as exc:
             return jsonify({"error": str(exc)}), 400
 

@@ -10,6 +10,16 @@
   --canvas: #111315;
   --success: #4bc881;
   --danger: #ff7770;
+  --workspace-overlay: rgb(0 0 0 / 58%);
+  --workspace-warning-text: #e4ad72;
+  --workspace-warning-border: #76512d;
+  --workspace-warning-bg: #2c241a;
+  --workspace-info-text: #9bbce0;
+  --workspace-info-bg: #1c2936;
+  --workspace-success-text: #75d49b;
+  --workspace-success-bg: #182c22;
+  --workspace-error-text: #ff9690;
+  --workspace-error-bg: #321d1d;
 }
 
 :root[data-theme="dark"] body,

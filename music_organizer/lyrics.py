@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import re
+import unicodedata
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
@@ -17,10 +18,13 @@ from xml.etree import ElementTree
 import requests
 from Crypto.Cipher import AES
 
+from .pathsafe import resolve_confined, resolve_root
 from .qrc import decrypt_qrc_to_lrc
 
 LYRIC_PROVIDERS = {"kugou", "qqmusic", "netease"}
 LYRIC_PROVIDER_PRIORITY = {"netease": 0, "qqmusic": 1, "kugou": 2}
+LYRIC_PROVIDER_CONFIDENCE = {"netease": 1.0, "qqmusic": 0.94, "kugou": 0.92}
+LYRIC_METADATA_WEIGHT = 0.88
 MAX_LYRIC_LENGTH = 512_000
 MAX_SEARCH_RESULTS_PER_PROVIDER = 12
 INSTRUMENTAL_LYRIC = "[00:05.00]纯音乐，请欣赏"
@@ -48,6 +52,35 @@ class LyricsProviderError(RuntimeError):
 
 def _safe_text(value: Any, limit: int = 500) -> str:
     return str(value or "").strip()[:limit]
+
+
+def normalize_provider_query(value: Any) -> str:
+    """Apply ESLyric upstream-style cleanup to provider search terms."""
+
+    text = unicodedata.normalize("NFKC", _safe_text(value, 500)).casefold()
+    text = text.replace("・", " ").replace("·", " ")
+    text = re.sub(
+        r"\([^)]*\)|\[[^]]*\]|\{[^}]*\}|（[^）]*）|【[^】]*】",
+        " ",
+        text,
+    )
+    text = re.sub(r"[^\w\s\u3040-\u30ff\u31f0-\u31ff\u3400-\u9fff]", " ", text)
+    return " ".join(text.replace("_", " ").split())
+
+
+def candidate_ranking_score(metadata_score: Any, provider: Any) -> float:
+    """Blend track matching with a small, explicit source-confidence prior."""
+
+    try:
+        match = float(metadata_score or 0)
+    except (TypeError, ValueError):
+        match = 0.0
+    source = _safe_text(provider, 30).lower()
+    source_confidence = LYRIC_PROVIDER_CONFIDENCE.get(source, 0.9)
+    combined = match * LYRIC_METADATA_WEIGHT + source_confidence * (
+        1.0 - LYRIC_METADATA_WEIGHT
+    )
+    return round(max(0.0, min(combined, 1.0)), 4)
 
 
 def _duration_seconds(value: Any) -> float:
@@ -314,6 +347,31 @@ def _similarity(query: str, value: str) -> float:
     return SequenceMatcher(None, left, right).ratio()
 
 
+def _normalized_similarity(query: str, value: str) -> float:
+    return _similarity(normalize_provider_query(query), normalize_provider_query(value))
+
+
+def _artist_similarity(query: str, value: str) -> float:
+    candidate = _safe_text(value, 500)
+    members = [candidate]
+    members.extend(
+        part.strip()
+        for part in re.split(
+            r"\s*(?:/|;|；|,|，|、|&|＆|×|\bfeat(?:uring)?\.?\b)\s*",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        if part.strip()
+    )
+    return max(
+        (
+            max(_similarity(query, member), _normalized_similarity(query, member))
+            for member in members
+        ),
+        default=0.0,
+    )
+
+
 def candidate_match(
     query_title: str,
     query_artist: str,
@@ -323,7 +381,11 @@ def candidate_match(
     query_album: str = "",
     artist_aliases: Iterable[str] | None = None,
 ) -> dict[str, Any]:
-    title_score = _similarity(query_title, _safe_text(candidate.get("title")))
+    candidate_title = _safe_text(candidate.get("title"))
+    title_score = max(
+        _similarity(query_title, candidate_title),
+        _normalized_similarity(query_title, candidate_title),
+    )
     alias_values = (
         artist_aliases
         if isinstance(artist_aliases, Sequence) and not isinstance(artist_aliases, (str, bytes))
@@ -332,7 +394,7 @@ def candidate_match(
     aliases = [query_artist, *alias_values]
     aliases = [_safe_text(value, 300) for value in aliases if _safe_text(value, 300)]
     artist_score = max(
-        (_similarity(value, _safe_text(candidate.get("artist"))) for value in aliases),
+        (_artist_similarity(value, _safe_text(candidate.get("artist"))) for value in aliases),
         default=0.0,
     )
     album_score = (
@@ -522,11 +584,17 @@ class LyricsSearchService:
         if not selected:
             raise ValueError("至少选择一个歌词来源")
         duration = _duration_seconds(duration)
+        provider_title = normalize_provider_query(title) or title
+        provider_artist = normalize_provider_query(artist) or artist
         results: list[dict[str, Any]] = []
         warnings: list[str] = []
         with ThreadPoolExecutor(max_workers=len(selected)) as executor:
             pending = {
-                executor.submit(getattr(self, f"_search_{provider}"), title, artist): provider
+                executor.submit(
+                    getattr(self, f"_search_{provider}"),
+                    provider_title,
+                    provider_artist,
+                ): provider
                 for provider in selected
             }
             for future in as_completed(pending):
@@ -548,13 +616,20 @@ class LyricsSearchService:
                     )
                     candidate["score"] = match.pop("score")
                     candidate["match"] = match
+                    candidate["source_confidence"] = LYRIC_PROVIDER_CONFIDENCE.get(
+                        provider, 0.9
+                    )
+                    candidate["ranking_score"] = candidate_ranking_score(
+                        candidate["score"], provider
+                    )
                     if provider == "qqmusic" and candidate.get("qq_mode") == "qrc":
                         candidate["request_duration"] = duration
                     results.append(candidate)
         results.sort(
             key=lambda value: (
-                LYRIC_PROVIDER_PRIORITY.get(str(value.get("source") or ""), 99),
+                -float(value.get("ranking_score") or 0),
                 -float(value.get("score") or 0),
+                LYRIC_PROVIDER_PRIORITY.get(str(value.get("source") or ""), 99),
             )
         )
         return {"candidates": results[:30], "warnings": warnings}
@@ -855,6 +930,30 @@ class LyricsSearchService:
             "translation": _decode_base64_text(payload.get("trans")),
         }
 
+    def _fetch_qqmusic_qrc_v2(self, provider_id: str) -> dict[str, str]:
+        text = self._text(
+            "GET",
+            "https://c.y.qq.com/qqmusic/fcgi-bin/lyric_download.fcg",
+            params={
+                "version": "15",
+                "miniversion": "82",
+                "lrctype": "4",
+                "musicid": provider_id,
+            },
+            headers={"Referer": "https://y.qq.com/"},
+        )
+        cleaned = re.sub(r"<!--|-->|<miniversion[^>]*/>", "", text).strip()
+        try:
+            root = ElementTree.fromstring(cleaned)
+        except ElementTree.ParseError as exc:
+            raise LyricsProviderError("QQ 音乐备用逐字歌词响应无法解析") from exc
+        for item in root.findall(".//lyric"):
+            encrypted = _safe_text(item.findtext("content"), MAX_LYRIC_LENGTH)
+            lyric = decrypt_qrc_to_lrc(encrypted)
+            if _lyric_has_usable_content(lyric):
+                return {"lyric": lyric}
+        raise LyricsProviderError("QQ 音乐备用逐字歌词没有正文")
+
     def _fetch_qqmusic(self, candidate: Mapping[str, Any]) -> dict[str, str]:
         provider_id = _safe_text(candidate.get("provider_id"), 200)
         if not provider_id or not re.fullmatch(r"[\w-]+", provider_id):
@@ -929,6 +1028,10 @@ class LyricsSearchService:
                     return result
                 raise LyricsProviderError("QQ 音乐逐字歌词没有正文")
             except (LyricsProviderError, TypeError, ValueError):
+                try:
+                    return self._fetch_qqmusic_qrc_v2(provider_id)
+                except LyricsProviderError:
+                    pass
                 legacy = self._search_qqmusic_legacy(
                     _safe_text(candidate.get("title")),
                     _safe_text(candidate.get("artist")),
@@ -990,14 +1093,13 @@ def normalize_lyric_decision(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _validated_destination(path: str | Path, library_root: str | Path) -> Path:
-    root = Path(library_root).resolve(strict=True)
-    candidate = Path(path)
-    if candidate.is_symlink():
-        raise ValueError(f"歌词写入目标不能是符号链接: {candidate}")
-    resolved = candidate.resolve(strict=True)
-    if not resolved.is_file() or not resolved.is_relative_to(root):
-        raise ValueError(f"歌词写入目标不在媒体库内: {resolved}")
-    return resolved
+    root = resolve_root(library_root, label="歌词媒体库")
+    return resolve_confined(
+        root,
+        path,
+        kind="file",
+        label="歌词写入目标",
+    )
 
 
 def _read_embedded_lyrics(audio: Any) -> str:

@@ -1,12 +1,13 @@
 """Validation and normalization for the HTML configuration form."""
 
+import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from apscheduler.triggers.cron import CronTrigger
 
-from .config import DEFAULT_BEETS_PATH_FORMAT
+from .config import DEFAULT_BEETS_PATH_FORMAT, normalize_review_source_profiles
 from .notifications import resolve_magicpush_token
 
 
@@ -95,7 +96,52 @@ def build_web_config(
     if magicpush_enabled and not (magicpush_token or saved_magicpush_token):
         raise ValueError("启用 MagicPush 时必须先保存 token")
 
-    review_roots = _lines(form.get("review_source_roots", ""))
+    profiles_payload = form.get("review_source_profiles")
+    if profiles_payload is not None:
+        try:
+            submitted_profiles = json.loads(str(profiles_payload) or "[]")
+        except json.JSONDecodeError as exc:
+            raise ValueError("目录方案数据格式错误") from exc
+        if not isinstance(submitted_profiles, list) or len(submitted_profiles) > 20:
+            raise ValueError("目录方案必须是最多 20 项的列表")
+        for value in submitted_profiles:
+            if not isinstance(value, dict):
+                raise ValueError("每个目录方案必须是对象")
+            path = str(value.get("path") or "").strip()
+            if not path.startswith("/"):
+                raise ValueError("目录方案路径必须使用容器内绝对路径")
+            if str(value.get("discovery_mode") or "direct") not in {
+                "direct",
+                "artist_album",
+            }:
+                raise ValueError("目录方案发现方式无效")
+            if str(value.get("import_mode") or "hardlink") not in {
+                "copy",
+                "hardlink",
+                "move",
+            }:
+                raise ValueError("目录方案入库方式无效")
+        profile_seed = dict(existing_review)
+        profile_seed["source_profiles"] = submitted_profiles
+        source_profiles = normalize_review_source_profiles(profile_seed)
+        if len(source_profiles) != len(submitted_profiles):
+            raise ValueError("目录方案路径不能为空或重复")
+    else:
+        review_roots_legacy = _lines(form.get("review_source_roots", ""))
+        existing_profiles = {
+            value["path"]: value
+            for value in normalize_review_source_profiles(existing_review)
+        }
+        profile_seed = dict(existing_review)
+        profile_seed["source_profiles"] = []
+        for path in review_roots_legacy:
+            profile = dict(
+                existing_profiles.get(path, {"path": path, "name": Path(path).name})
+            )
+            profile["auto_discover"] = _checked(form, "review_auto_discover")
+            profile_seed["source_profiles"].append(profile)
+        source_profiles = normalize_review_source_profiles(profile_seed)
+    review_roots = [profile["path"] for profile in source_profiles]
     if any(not value.startswith("/") for value in review_roots):
         raise ValueError("音乐预审允许目录必须使用容器内绝对路径")
     review_enabled = _checked(form, "review_enabled")
@@ -245,6 +291,13 @@ def build_web_config(
             "api_key": qb_api_key,
             "api_key_file": str(existing_qb.get("api_key_file") or ""),
             "timeout": min(max(int(form.get("qb_timeout", "10") or "10"), 3), 120),
+            "network_max_attempts": int(existing_qb.get("network_max_attempts", 3)),
+            "network_retry_seconds": float(
+                existing_qb.get("network_retry_seconds", 1)
+            ),
+            "network_retry_max_seconds": float(
+                existing_qb.get("network_retry_max_seconds", 5)
+            ),
             "min_completion_age_seconds": min(
                 max(int(form.get("qb_min_completion_age_seconds", "60") or "60"), 0),
                 3600,
@@ -260,6 +313,7 @@ def build_web_config(
         "review": {
             "enabled": review_enabled,
             "source_roots": review_roots,
+            "source_profiles": source_profiles,
             "proxy_url": review_proxy_url,
             "proxy_username": review_proxy_username,
             "proxy_password": review_proxy_password,
@@ -286,11 +340,15 @@ def build_web_config(
                 max(int(existing_review.get("import_timeout_seconds", 3600) or 3600), 60),
                 86400,
             ),
-            "auto_discover": _checked(form, "review_auto_discover"),
+            "auto_discover": (
+                any(profile["auto_discover"] for profile in source_profiles)
+                if profiles_payload is not None
+                else _checked(form, "review_auto_discover")
+            ),
             "discovery_interval_seconds": min(
                 max(
-                    int(form.get("review_discovery_interval_seconds", "15") or "15"),
-                    5,
+                    int(form.get("review_discovery_interval_seconds", "60") or "60"),
+                    30,
                 ),
                 3600,
             ),

@@ -1,12 +1,12 @@
 {
   "name": "music-organizer-web",
   "private": true,
-  "version": "1.8.1",
+  "version": "1.10.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "lint": "eslint .",
-    "test": "node --test",
+    "test": "node --test && vitest run",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -21,9 +21,12 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@vitejs/plugin-vue": "^6.0.0",
+    "@vue/test-utils": "^2.4.11",
     "eslint": "10.8.0",
     "eslint-plugin-vue": "10.10.0",
     "globals": "17.7.0",
-    "vite": "^7.0.0"
+    "happy-dom": "^20.11.8",
+    "vite": "^7.0.0",
+    "vitest": "^4.1.11"
   }
 }

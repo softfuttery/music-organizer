@@ -16,7 +16,7 @@ from .naming import (
     album_has_multiple_primary_artists,
     picard_preset3_relative_path,
 )
-from .review import AUDIO_EXTENSIONS, audio_files, source_signature
+from .review import audio_files, auxiliary_files, source_signature
 
 
 class MusicBrainzUnavailableError(RuntimeError):
@@ -224,16 +224,6 @@ def _normalized_credit(value: Any) -> str:
     return " ".join(str(value or "").split()).casefold()
 
 
-def _auxiliary_files(source_root: Path) -> list[str]:
-    return sorted(
-        path.relative_to(source_root).as_posix()
-        for path in source_root.rglob("*")
-        if path.is_file()
-        and not path.is_symlink()
-        and path.suffix.lower() not in AUDIO_EXTENSIONS
-    )
-
-
 def serialize_album_candidate(
     candidate: Any,
     source_root: Path,
@@ -378,7 +368,7 @@ def serialize_album_candidate(
         "track_options": track_options,
         "extra_items": extra_items,
         "extra_tracks": extra_tracks,
-        "auxiliary_files": _auxiliary_files(source_root),
+        "auxiliary_files": auxiliary_files(source_root),
     }
 
 

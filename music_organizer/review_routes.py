@@ -2,13 +2,16 @@
 
 import sqlite3
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from flask import Blueprint, jsonify, request, send_file
 
+from .audio_preview import AudioPreviewError, browser_compatible_audio
+from .library_manager import audio_duration
 from .lyrics import LyricsProviderError, LyricsSearchService
 from .manual_review import build_manual_candidate
+from .pathsafe import resolve_confined, safe_relative_parts
 from .review import (
     AUDIO_EXTENSIONS,
     ActiveReviewOverlapError,
@@ -31,35 +34,20 @@ def create_review_blueprint(
 
     def item_audio_path(item_id: int, raw_path: str) -> tuple[dict, Path]:
         item = repository.item(item_id)
-        relative = PurePosixPath(str(raw_path or "").strip())
-        if not relative.parts or relative.is_absolute() or ".." in relative.parts:
-            raise ValueError("音频路径无效")
+        try:
+            relative = Path(*safe_relative_parts(str(raw_path or "").strip()))
+        except ValueError as exc:
+            raise ValueError("音频路径无效") from exc
         root = Path(item["source_path"])
-        if root.is_symlink():
-            raise ValueError("预审源目录不能是符号链接")
-        resolved_root = root.resolve(strict=True)
-        current = resolved_root
-        for part in relative.parts:
-            current = current / part
-            if current.is_symlink():
-                raise ValueError("音频路径不能包含符号链接")
-        resolved = current.resolve(strict=True)
-        if (
-            not resolved.is_file()
-            or not resolved.is_relative_to(resolved_root)
-            or resolved.suffix.lower() not in AUDIO_EXTENSIONS
-        ):
+        resolved = resolve_confined(
+            root,
+            relative,
+            kind="file",
+            label="预审音频文件",
+        )
+        if resolved.suffix.lower() not in AUDIO_EXTENSIONS:
             raise ValueError("音频文件不在当前预审项目中")
         return item, resolved
-
-    def audio_duration(path: Path) -> float:
-        try:
-            from mutagen import File, MutagenError
-
-            media = File(str(path), easy=False)
-            return round(float(getattr(getattr(media, "info", None), "length", 0) or 0), 3)
-        except (MutagenError, OSError, TypeError, ValueError):
-            return 0.0
 
     def lyric_service(review: dict) -> LyricsSearchService:
         return LyricsSearchService(review, timeout=10)
@@ -135,13 +123,19 @@ def create_review_blueprint(
     def item_audio(item_id: int):
         try:
             _item, path = item_audio_path(item_id, request.args.get("path", ""))
-            response = send_file(path, conditional=True, max_age=300)
+            preview_path = browser_compatible_audio(
+                path,
+                repository.database_path.parent / "preview-cache",
+            )
+            response = send_file(preview_path, conditional=True, max_age=300)
             response.headers["Cache-Control"] = "private, max-age=300"
             return response
         except KeyError as exc:
             return jsonify({"error": str(exc)}), 404
         except (OSError, ValueError) as exc:
             return jsonify({"error": str(exc)}), 400
+        except AudioPreviewError as exc:
+            return jsonify({"error": str(exc)}), 422
 
     @blueprint.post("/items/<int:item_id>/lyrics/search")
     def search_lyrics(item_id: int):
@@ -203,12 +197,21 @@ def create_review_blueprint(
     def batches():
         if request.method == "GET":
             limit = min(max(request.args.get("limit", 30, type=int), 1), 100)
+            offset = max(request.args.get("offset", 0, type=int), 0)
             scope = request.args.get(
                 "scope", "active", type=str
             ).strip().lower()
             query = request.args.get("q", "", type=str).strip()
             try:
-                values = repository.batches(limit, scope=scope, query=query)
+                total = repository.batch_count(scope=scope, query=query)
+                if total:
+                    offset = min(offset, ((total - 1) // limit) * limit)
+                values = repository.batches(
+                    limit,
+                    scope=scope,
+                    query=query,
+                    offset=offset,
+                )
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), 400
             return jsonify(
@@ -216,6 +219,13 @@ def create_review_blueprint(
                     "batches": values,
                     "scope": scope,
                     "counts": repository.scope_counts(),
+                    "pagination": {
+                        "total": total,
+                        "offset": offset,
+                        "limit": limit,
+                        "has_previous": offset > 0,
+                        "has_next": offset + len(values) < total,
+                    },
                 }
             )
 
@@ -252,8 +262,18 @@ def create_review_blueprint(
             "scope", "active", type=str
         ).strip().lower()
         query = request.args.get("q", "", type=str).strip()
+        offset = max(request.args.get("offset", 0, type=int), 0)
+        requested_limit = request.args.get("limit", type=int)
         try:
-            return jsonify(repository.batch(batch_id, scope=scope, query=query))
+            return jsonify(
+                repository.batch(
+                    batch_id,
+                    scope=scope,
+                    query=query,
+                    offset=offset,
+                    limit=requested_limit,
+                )
+            )
         except KeyError as exc:
             return jsonify({"error": str(exc)}), 404
         except ValueError as exc:
@@ -388,19 +408,19 @@ def create_review_blueprint(
 
             recycle_value = str(review.get("recycle_directory") or "").strip()
             if not recycle_value:
-                raise ValueError("请先在配置页设置回收目录")
+                raise ValueError("请先在配置页设置预审回收站目录")
             recycle = Path(recycle_value).expanduser()
             if not recycle.is_absolute():
-                raise ValueError("回收目录必须使用容器内绝对路径")
+                raise ValueError("预审回收站必须使用容器内绝对路径")
             if recycle.is_symlink():
-                raise ValueError("回收目录不能是符号链接")
+                raise ValueError("预审回收站目录不能是符号链接")
             recycle_parent = recycle.parent.resolve(strict=True)
             if not recycle_parent.is_dir():
-                raise ValueError("回收目录的父目录不可用")
+                raise ValueError("预审回收站的父目录不可用")
             recycle.mkdir(exist_ok=True)
             recycle = recycle.resolve(strict=True)
             if recycle == source or recycle.is_relative_to(source):
-                raise ValueError("回收目录不能位于待移动的专辑目录内")
+                raise ValueError("预审回收站不能位于待移动的专辑目录内")
 
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             destination = recycle / f"{stamp}-review-{item_id}-{source.name}"

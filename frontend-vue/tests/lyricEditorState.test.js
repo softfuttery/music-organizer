@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   hasTextDecodeDamage,
   highConfidenceLyricCandidate,
+  highConfidenceLyricCandidates,
   highestScoredLyricCandidate,
   lyricCandidateTitle,
   lyricCandidateMatchSummary,
@@ -30,13 +31,17 @@ test('highest scored lyric candidate is selected for automatic preview', () => {
   assert.equal(highConfidenceLyricCandidate([{ score: 0.8 }]), null)
 })
 
-test('automatic preview respects provider-priority candidate order', () => {
+test('automatic preview uses comprehensive ranking among high-confidence candidates', () => {
   const candidates = [
-    { source: 'netease', provider_id: 'preferred', score: 0.92 },
-    { source: 'qqmusic', provider_id: 'higher-score', score: 1 },
+    { source: 'netease', provider_id: 'preferred', score: 0.92, ranking_score: 0.93 },
+    { source: 'qqmusic', provider_id: 'higher-score', score: 1, ranking_score: 0.99 },
   ]
 
-  assert.equal(highConfidenceLyricCandidate(candidates).provider_id, 'preferred')
+  assert.equal(highConfidenceLyricCandidate(candidates).provider_id, 'higher-score')
+  assert.deepEqual(
+    highConfidenceLyricCandidates(candidates).map((candidate) => candidate.provider_id),
+    ['higher-score', 'preferred'],
+  )
 })
 
 test('lyric candidates always expose a useful display title', () => {

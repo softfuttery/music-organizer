@@ -12,18 +12,33 @@ import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from music_organizer.beets_review import BeetsReviewMatcher, configure_http_proxy
+from music_organizer.config import normalize_review_source_profiles
 from music_organizer.lyrics import embed_imported_lyrics
 from music_organizer.repository import SQLiteOrganizerRepository
 from music_organizer.review import (
+    AUDIO_EXTENSIONS,
     ReviewRepository,
     audio_files,
     finalize_review_import,
     quarantine_files,
     source_signature,
+)
+from music_organizer.runtime import runtime_is_ready
+from music_organizer.source_guard import (
+    SourceIdentity,
+    parse_source_guard,
+    snapshot_has_new_or_replaced_paths,
+)
+from music_organizer.source_guard import (
+    serialize_source_guard as source_guard,
+)
+from music_organizer.source_guard import (
+    source_identity_snapshot as capture_source_identity_snapshot,
 )
 from organizer import MusicOrganizer
 
@@ -32,84 +47,66 @@ DATABASE_PATH = Path(
     os.environ.get("DATABASE_PATH", "/app/data/organizer.sqlite3")
 )
 LOG_PATH = Path(os.environ.get("LOG_PATH", "/app/data/organizer.log"))
+REVIEW_HEARTBEAT_WRITE_SECONDS = max(
+    1.0,
+    min(
+        float(os.environ.get("REVIEW_WORKER_HEARTBEAT_MAX_AGE_SECONDS", "30"))
+        / 3,
+        10.0,
+    ),
+)
 
 
-SourceIdentity = tuple[int, int, int, int, int]
+@dataclass(frozen=True)
+class SourceObservation:
+    root: Path
+    root_identity: tuple[int, int]
+    snapshot: dict[str, SourceIdentity]
 
 
 def source_identity_snapshot(root: Path) -> dict[str, SourceIdentity]:
-    """Capture path identities without following links or hashing media."""
-    snapshot: dict[str, SourceIdentity] = {}
-    for current_root, dirnames, filenames in os.walk(root, followlinks=False):
-        current = Path(current_root)
-        for name in (*dirnames, *filenames):
-            candidate = current / name
-            metadata = candidate.lstat()
-            relative = candidate.relative_to(root).as_posix()
-            file_type = stat.S_IFMT(metadata.st_mode)
-            snapshot[relative] = (
-                int(metadata.st_dev),
-                int(metadata.st_ino),
-                file_type,
-                int(metadata.st_size) if stat.S_ISREG(metadata.st_mode) else 0,
-                int(metadata.st_mtime_ns) if stat.S_ISREG(metadata.st_mode) else 0,
-            )
-        dirnames[:] = [
-            name for name in dirnames if not (current / name).is_symlink()
-        ]
-    return snapshot
+    return capture_source_identity_snapshot(
+        root,
+        symlink_policy="record_and_skip",
+    )
 
 
-def source_guard(
-    root_identity: tuple[int, int],
-    snapshot: dict[str, SourceIdentity],
-) -> dict:
-    return {
-        "root": list(root_identity),
-        "entries": {path: list(identity) for path, identity in snapshot.items()},
-    }
-
-
-def parse_source_guard(value: object) -> tuple[tuple[int, int], dict[str, SourceIdentity]]:
-    if not isinstance(value, dict):
-        raise ValueError("持久化入库源保护快照无效")
-    raw_root = value.get("root")
-    raw_entries = value.get("entries")
-    if not isinstance(raw_root, list) or len(raw_root) != 2 or not isinstance(
-        raw_entries, dict
-    ):
-        raise ValueError("持久化入库源保护快照不完整")
+def observe_source(source_path: Path) -> SourceObservation | None:
+    """Resolve and snapshot an import source without accepting symlink roots."""
+    if source_path.is_symlink():
+        return None
     try:
-        root_identity = (int(raw_root[0]), int(raw_root[1]))
-        entries = {
-            str(path): tuple(int(part) for part in identity)
-            for path, identity in raw_entries.items()
-            if isinstance(path, str)
-            and isinstance(identity, list)
-            and len(identity) == 5
-        }
-    except (TypeError, ValueError) as exc:
-        raise ValueError("持久化入库源保护快照无效") from exc
-    if len(entries) != len(raw_entries):
-        raise ValueError("持久化入库源保护快照包含无效文件身份")
-    return root_identity, entries
+        root = source_path.resolve(strict=True)
+        if not root.is_dir():
+            return None
+        metadata = root.stat()
+        return SourceObservation(
+            root=root,
+            root_identity=(int(metadata.st_dev), int(metadata.st_ino)),
+            snapshot=source_identity_snapshot(root),
+        )
+    except (FileNotFoundError, OSError, RuntimeError):
+        return None
 
 
-def snapshot_has_new_or_replaced_paths(
-    before: dict[str, SourceIdentity],
-    after: dict[str, SourceIdentity],
+def _source_unchanged(
+    expected_root_identity: tuple[int, int] | None,
+    expected_snapshot: dict[str, SourceIdentity],
+    observation: SourceObservation | None,
     *,
     allowed_metadata_changes: set[str] | None = None,
 ) -> bool:
-    """Missing paths are expected for move mode; additions/replacements are not."""
-    allowed_metadata_changes = allowed_metadata_changes or set()
-    for path, identity in after.items():
-        previous = before.get(path)
-        if previous is None or previous[:3] != identity[:3]:
-            return True
-        if previous[3:] != identity[3:] and path not in allowed_metadata_changes:
-            return True
-    return False
+    """Compare a fresh observation with the persisted approval boundary."""
+    return bool(
+        expected_root_identity is not None
+        and observation is not None
+        and observation.root_identity == expected_root_identity
+        and not snapshot_has_new_or_replaced_paths(
+            expected_snapshot,
+            observation.snapshot,
+            allowed_metadata_changes=allowed_metadata_changes,
+        )
+    )
 
 
 def expected_hardlink_metadata_changes(
@@ -140,9 +137,48 @@ def expected_hardlink_metadata_changes(
     return allowed
 
 
+def _visible_directories(path: Path) -> list[Path]:
+    return sorted(
+        (
+            child
+            for child in path.iterdir()
+            if child.is_dir()
+            and not child.is_symlink()
+            and not child.name.startswith(".music-organizer-")
+            and child.name != "#recycle"
+        ),
+        key=lambda child: child.name.casefold(),
+    )
+
+
+def _has_direct_audio(path: Path) -> bool:
+    try:
+        return any(
+            child.is_file() and child.suffix.lower() in AUDIO_EXTENSIONS
+            for child in path.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def discovery_directories(root: Path, mode: str) -> list[Path]:
+    """Find album roots without splitting multi-disc album subdirectories."""
+    children = _visible_directories(root)
+    if mode != "artist_album":
+        return children
+    albums: list[Path] = []
+    for artist in children:
+        if _has_direct_audio(artist):
+            albums.append(artist)
+            continue
+        albums.extend(_visible_directories(artist))
+    return albums
+
+
 class ReviewWorker:
     def __init__(self) -> None:
         self.shutdown_requested = threading.Event()
+        self._next_heartbeat_at = 0.0
         self.import_lock = threading.Lock()
         self.organizer = MusicOrganizer(
             str(CONFIG_PATH),
@@ -156,7 +192,11 @@ class ReviewWorker:
         self.organizer.repository.set_app_state_value("review_import_active_at", "")
         config = self.organizer.load_config()
         self.discovery_observations: dict[str, tuple[str, float]] = {}
+        self.discovery_settled: dict[
+            str, tuple[tuple[int, int, int, int], str]
+        ] = {}
         self.next_discovery_at = 0.0
+        self.next_full_discovery_at = 0.0
         self._apply_runtime_config(config)
         revision = self._read_runtime_config_revision()
         self._runtime_config_revision = revision
@@ -182,6 +222,9 @@ class ReviewWorker:
         if not isinstance(review, dict):
             raise ValueError("review 配置必须是对象")
         review = dict(review)
+        source_profiles = normalize_review_source_profiles(review)
+        review["source_profiles"] = source_profiles
+        review["source_roots"] = [profile["path"] for profile in source_profiles]
         enabled = bool(review.get("enabled", False))
         worker_count = min(
             max(int(review.get("identify_workers", 3) or 3), 1), 8
@@ -197,10 +240,19 @@ class ReviewWorker:
             max(float(configured_import_timeout or 3600), 60),
             86400,
         )
-        auto_discover = bool(review.get("auto_discover", True))
+        auto_discover = any(
+            profile["auto_discover"] for profile in source_profiles
+        )
         discovery_interval_seconds = min(
-            max(float(review.get("discovery_interval_seconds", 15) or 15), 5),
+            max(float(review.get("discovery_interval_seconds", 60) or 60), 30),
             3600,
+        )
+        discovery_full_rescan_seconds = min(
+            max(
+                float(review.get("discovery_full_rescan_seconds", 600) or 600),
+                discovery_interval_seconds,
+            ),
+            86400,
         )
         discovery_stable_seconds = min(
             max(float(review.get("discovery_stable_seconds", 60) or 60), 10),
@@ -212,6 +264,27 @@ class ReviewWorker:
             or DATABASE_PATH.parent / "review-beets-config.yaml"
         )
         beets_config_path = self.organizer.write_beets_config(import_config)
+        profile_beets_config_paths: dict[str, Path] = {}
+        base_import_mode = str(import_config.get("import_mode") or "hardlink").lower()
+        for profile in source_profiles:
+            effective = dict(import_config)
+            effective["import_mode"] = profile["import_mode"]
+            effective["move_extra_files"] = profile["move_extra_files"]
+            effective["cleanup_source_after_import"] = profile[
+                "cleanup_source_after_import"
+            ]
+            if profile["import_mode"] == base_import_mode:
+                profile_beets_config_paths[profile["id"]] = beets_config_path
+                continue
+            suffix = beets_config_path.suffix or ".yaml"
+            effective["config_path"] = str(
+                beets_config_path.with_name(
+                    f"{beets_config_path.stem}-{profile['id']}{suffix}"
+                )
+            )
+            profile_beets_config_paths[profile["id"]] = (
+                self.organizer.write_beets_config(effective)
+            )
         matcher = BeetsReviewMatcher(beets_config_path)
         if enabled:
             matcher.configure()
@@ -224,6 +297,8 @@ class ReviewWorker:
         )
 
         self.review_config = review
+        self.source_profiles = source_profiles
+        self.profile_beets_config_paths = profile_beets_config_paths
         self.enabled = enabled
         self.worker_count = worker_count
         self.poll_seconds = poll_seconds
@@ -231,16 +306,45 @@ class ReviewWorker:
         self.import_timeout_seconds = import_timeout_seconds
         self.auto_discover = auto_discover
         self.discovery_interval_seconds = discovery_interval_seconds
+        self.discovery_full_rescan_seconds = discovery_full_rescan_seconds
         self.discovery_stable_seconds = discovery_stable_seconds
         self.import_config = import_config
         self.beets_config_path = beets_config_path
         self.matcher = matcher
         self.discovery_observations = {}
+        self.discovery_settled = {}
         self.next_discovery_at = 0.0
+        self.next_full_discovery_at = 0.0
         self.organizer.repository.set_app_state_value(
             "review_import_timeout_seconds",
             str(self.import_timeout_seconds),
         )
+
+    def effective_review_config(self, source_path: Path) -> tuple[dict, Path]:
+        """Resolve the most specific directory workflow for one review item."""
+        resolved = source_path.expanduser().resolve(strict=False)
+        matches: list[tuple[int, dict]] = []
+        source_profiles = getattr(self, "source_profiles", None)
+        if source_profiles is None:
+            source_profiles = normalize_review_source_profiles(self.review_config)
+        for profile in source_profiles:
+            root = Path(profile["path"]).expanduser().resolve(strict=False)
+            if resolved == root or resolved.is_relative_to(root):
+                matches.append((len(root.parts), profile))
+        effective = dict(self.review_config)
+        config_path = self.beets_config_path
+        if matches:
+            profile = max(matches, key=lambda value: value[0])[1]
+            for key in (
+                "import_mode",
+                "move_extra_files",
+                "cleanup_source_after_import",
+            ):
+                effective[key] = profile[key]
+            config_path = getattr(self, "profile_beets_config_paths", {}).get(
+                profile["id"], self.beets_config_path
+            )
+        return effective, config_path
 
     def runtime_config_changed(self) -> bool:
         return (
@@ -266,20 +370,42 @@ class ReviewWorker:
         return True
 
     def heartbeat(self) -> None:
+        now = time.monotonic()
+        if now < self._next_heartbeat_at:
+            return
         self.organizer.repository.set_app_state_value(
             "review_worker_heartbeat",
             datetime.now().isoformat(timespec="seconds"),
         )
+        self._next_heartbeat_at = now + REVIEW_HEARTBEAT_WRITE_SECONDS
 
     def discover_new_music(self, now: float | None = None) -> dict | None:
         """Queue album directories after their audio contents remain stable."""
         observed_at = time.monotonic() if now is None else now
+        full_rescan_seconds = float(
+            getattr(self, "discovery_full_rescan_seconds", 600)
+        )
+        full_rescan = observed_at >= getattr(
+            self, "next_full_discovery_at", 0.0
+        )
+        if full_rescan:
+            self.next_full_discovery_at = observed_at + full_rescan_seconds
+        settled = getattr(self, "discovery_settled", {})
         current: dict[str, tuple[str, float]] = {}
+        revisions: dict[str, tuple[int, int, int, int]] = {}
         stable_entries: list[tuple[Path, str]] = []
-        for configured_root in self.review_config.get("source_roots", []):
+        source_profiles = getattr(self, "source_profiles", None)
+        if source_profiles is None:
+            source_profiles = normalize_review_source_profiles(self.review_config)
+        for profile in source_profiles:
+            if not profile.get("auto_discover"):
+                continue
+            configured_root = profile["path"]
             try:
                 root = Path(configured_root).expanduser().resolve(strict=True)
-                children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+                children = discovery_directories(
+                    root, str(profile.get("discovery_mode") or "direct")
+                )
             except OSError as exc:
                 self.organizer.logger.warning(
                     "Review discovery skipped unavailable root %s: %s",
@@ -288,14 +414,31 @@ class ReviewWorker:
                 )
                 continue
             for child in children:
-                if (
-                    not child.is_dir()
-                    or child.is_symlink()
-                    or child.name.startswith(".music-organizer-")
-                    or child.name == "#recycle"
-                ):
+                if child.name.startswith(".music-organizer-") or child.name == "#recycle":
                     continue
                 try:
+                    metadata = child.stat(follow_symlinks=False)
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        continue
+                    key = str(child.resolve(strict=True))
+                    revision = (
+                        int(metadata.st_dev),
+                        int(metadata.st_ino),
+                        int(metadata.st_mtime_ns),
+                        int(metadata.st_ctime_ns),
+                    )
+                    revisions[key] = revision
+                    settled_entry = settled.get(key)
+                    if (
+                        not full_rescan
+                        and settled_entry is not None
+                        and settled_entry[0] == revision
+                    ):
+                        current[key] = (
+                            settled_entry[1],
+                            observed_at - self.discovery_stable_seconds,
+                        )
+                        continue
                     files = audio_files(child)
                     if not files:
                         continue
@@ -307,7 +450,6 @@ class ReviewWorker:
                         exc,
                     )
                     continue
-                key = str(child.resolve())
                 previous = self.discovery_observations.get(key)
                 first_seen = (
                     previous[1]
@@ -319,6 +461,14 @@ class ReviewWorker:
                     stable_entries.append((Path(key), signature))
         self.discovery_observations = current
         batch = self.repository.create_discovered_batch(stable_entries)
+        for path, signature in stable_entries:
+            key = str(path)
+            revision = revisions.get(key)
+            if revision is not None:
+                settled[key] = (revision, signature)
+        self.discovery_settled = {
+            key: value for key, value in settled.items() if key in current
+        }
         if batch is not None:
             self.organizer.logger.info(
                 "Automatically queued review batch %s with %s album(s)",
@@ -367,6 +517,103 @@ class ReviewWorker:
         with self.import_lock:
             self._import_approved(job)
 
+    def _run_approved_import(
+        self,
+        *,
+        job: dict,
+        root: Path,
+        candidate: dict,
+        track_mapping: list,
+        recovery_token: str,
+        persisted_guard: dict,
+        source_available: bool,
+        source_changed: bool,
+        hardlink_tag_recovery: bool,
+        beets_config_path: Path,
+    ) -> tuple[dict, bool]:
+        manual_import = candidate.get("data_source") == "manual"
+        if manual_import:
+            command = [
+                sys.executable,
+                "-m",
+                "music_organizer.manual_importer",
+                "--config",
+                str(beets_config_path),
+                "--source",
+                str(root),
+                "--tracks-json",
+                json.dumps(
+                    candidate.get("tracks", []),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                "--recovery-token",
+                recovery_token,
+            ]
+        else:
+            command = [
+                sys.executable,
+                "-m",
+                "music_organizer.review_importer",
+                "--config",
+                str(beets_config_path),
+                "--source",
+                str(root),
+                "--album-id",
+                str(candidate["album_id"]),
+                "--mapping-json",
+                json.dumps(
+                    track_mapping,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                "--recovery-token",
+                recovery_token,
+            ]
+        if persisted_guard and source_available:
+            command.extend(
+                [
+                    "--import-guard-json",
+                    json.dumps(
+                        persisted_guard,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ]
+            )
+        if not source_available or (
+            source_changed and not hardlink_tag_recovery
+        ):
+            # Recovery is confined to beets items carrying this task's token.
+            command.append("--recover-only")
+
+        returncode, output = self.organizer.run_interruptible_process(
+            command,
+            timeout=self.import_timeout_seconds,
+        )
+        if returncode != 0:
+            raise RuntimeError(output[-2000:] or f"beets 退出码 {returncode}")
+        import_result: dict = {}
+        for line in reversed(output.splitlines()):
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict) and value.get("album_id"):
+                import_result = value
+                break
+        if not import_result.get("album_id") or not import_result.get(
+            "imported_tracks"
+        ):
+            raise RuntimeError("beets 成功退出但未返回完整入库清单")
+        self.repository.checkpoint_import(
+            int(job["queue_id"]),
+            int(job["item_id"]),
+            dict(import_result),
+        )
+        return import_result, bool(import_result.get("reused_existing_album"))
+
     def _import_approved(self, job: dict) -> None:
         self.organizer.repository.set_app_state_value(
             "review_import_active_at",
@@ -393,28 +640,24 @@ class ReviewWorker:
             decision = json.loads(job.get("decision_json") or "{}")
             track_mapping = decision.get("track_mapping") or []
             manual_import = candidate.get("data_source") == "manual"
-            effective_tag_config = dict(self.review_config)
+            effective_review_config, beets_config_path = (
+                self.effective_review_config(source_path)
+            )
+            effective_tag_config = dict(effective_review_config)
             if manual_import:
                 effective_tag_config["write_tags"] = True
             lyric_decisions = json.loads(job.get("lyrics_json") or "{}")
             root = source_path
-            source_available = False
             source_changed = False
             source_root_identity: tuple[int, int] | None = None
             source_snapshot: dict[str, SourceIdentity] = {}
-            if not source_path.is_symlink():
-                try:
-                    root = source_path.resolve(strict=True)
-                    source_available = root.is_dir()
-                except (FileNotFoundError, OSError, RuntimeError):
-                    source_available = False
+            observation = observe_source(source_path)
+            source_available = observation is not None
             if source_available:
-                root_stat = root.stat()
-                current_root_identity = (
-                    int(root_stat.st_dev),
-                    int(root_stat.st_ino),
-                )
-                current_snapshot = source_identity_snapshot(root)
+                assert observation is not None
+                root = observation.root
+                current_root_identity = observation.root_identity
+                current_snapshot = observation.snapshot
                 if persisted_guard:
                     source_root_identity, source_snapshot = parse_source_guard(
                         persisted_guard
@@ -449,7 +692,7 @@ class ReviewWorker:
                 and source_available
                 and source_changed
                 and str(
-                    self.review_config.get("import_mode") or "hardlink"
+                    effective_review_config.get("import_mode") or "hardlink"
                 ).lower()
                 == "hardlink"
                 and bool(effective_tag_config.get("write_tags", False))
@@ -463,90 +706,19 @@ class ReviewWorker:
             )
             import_result = dict(checkpoint)
             if not import_result:
-                if manual_import:
-                    cmd = [
-                        sys.executable,
-                        "-m",
-                        "music_organizer.manual_importer",
-                        "--config",
-                        str(self.beets_config_path),
-                        "--source",
-                        str(root),
-                        "--tracks-json",
-                        json.dumps(
-                            candidate.get("tracks", []),
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        "--recovery-token",
-                        recovery_token,
-                    ]
-                else:
-                    cmd = [
-                        sys.executable,
-                        "-m",
-                        "music_organizer.review_importer",
-                        "--config",
-                        str(self.beets_config_path),
-                        "--source",
-                        str(root),
-                        "--album-id",
-                        str(candidate["album_id"]),
-                        "--mapping-json",
-                        json.dumps(
-                            track_mapping,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        ),
-                        "--recovery-token",
-                        recovery_token,
-                    ]
-                if persisted_guard and source_available:
-                    cmd.extend(
-                        [
-                            "--import-guard-json",
-                            json.dumps(
-                                persisted_guard,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                                sort_keys=True,
-                            ),
-                        ]
-                    )
-                if not source_available or (
-                    source_changed and not hardlink_tag_recovery
-                ):
-                    # The importer may only reconcile items carrying this task's
-                    # token; it must never import changed or replacement input.
-                    cmd.append("--recover-only")
-                returncode, output = self.organizer.run_interruptible_process(
-                    cmd,
-                    timeout=self.import_timeout_seconds,
+                import_result, reused_existing_album = self._run_approved_import(
+                    job=job,
+                    root=root,
+                    candidate=candidate,
+                    track_mapping=track_mapping,
+                    recovery_token=recovery_token,
+                    persisted_guard=persisted_guard,
+                    source_available=source_available,
+                    source_changed=source_changed,
+                    hardlink_tag_recovery=hardlink_tag_recovery,
+                    beets_config_path=beets_config_path,
                 )
-                if returncode != 0:
-                    raise RuntimeError(
-                        output[-2000:] or f"beets 退出码 {returncode}"
-                    )
-                for line in reversed(output.splitlines()):
-                    try:
-                        value = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(value, dict) and value.get("album_id"):
-                        import_result = value
-                        break
-                if not import_result.get("album_id") or not import_result.get(
-                    "imported_tracks"
-                ):
-                    raise RuntimeError("beets 成功退出但未返回完整入库清单")
-                recovery_completion = recovery_completion or bool(
-                    import_result.get("reused_existing_album")
-                )
-                self.repository.checkpoint_import(
-                    int(job["queue_id"]),
-                    int(job["item_id"]),
-                    dict(import_result),
-                )
+                recovery_completion = recovery_completion or reused_existing_album
             elif not import_result.get("album_id") or not import_result.get(
                 "imported_tracks"
             ):
@@ -573,46 +745,32 @@ class ReviewWorker:
             # user approved.
             allowed_metadata_changes: set[str] = set()
             if source_available:
-                try:
-                    refreshed_root = source_path.resolve(strict=True)
-                    if source_path.is_symlink() or not refreshed_root.is_dir():
-                        source_available = False
+                observation = observe_source(source_path)
+                source_available = observation is not None
+                if observation is not None:
+                    root = observation.root
+                    allowed_metadata_changes = expected_hardlink_metadata_changes(
+                        root,
+                        list(import_result.get("imported_tracks", [])),
+                        effective_tag_config,
+                    )
+                    refreshed_changed = not _source_unchanged(
+                        source_root_identity,
+                        source_snapshot,
+                        observation,
+                        allowed_metadata_changes=allowed_metadata_changes,
+                    )
+                    if hardlink_tag_recovery and (
+                        bool(checkpoint)
+                        or bool(import_result.get("reused_existing_album"))
+                    ):
+                        # A prior checkpoint or the child has already established
+                        # same-task ownership. Recompute instead of retaining the
+                        # pre-run tag metadata delta, so the completed item stores
+                        # its new stable signature.
+                        source_changed = refreshed_changed
                     else:
-                        root = refreshed_root
-                        refreshed_stat = root.stat()
-                        refreshed_identity = (
-                            int(refreshed_stat.st_dev),
-                            int(refreshed_stat.st_ino),
-                        )
-                        allowed_metadata_changes = (
-                            expected_hardlink_metadata_changes(
-                                root,
-                                list(import_result.get("imported_tracks", [])),
-                                effective_tag_config,
-                            )
-                        )
-                        refreshed_changed = (
-                            source_root_identity is None
-                            or refreshed_identity != source_root_identity
-                            or snapshot_has_new_or_replaced_paths(
-                                source_snapshot,
-                                source_identity_snapshot(root),
-                                allowed_metadata_changes=allowed_metadata_changes,
-                            )
-                        )
-                        if hardlink_tag_recovery and (
-                            bool(checkpoint)
-                            or bool(import_result.get("reused_existing_album"))
-                        ):
-                            # A prior checkpoint or the child has already
-                            # established same-task ownership. Recompute instead
-                            # of retaining the pre-run tag metadata delta, so the
-                            # completed item stores its new stable signature.
-                            source_changed = refreshed_changed
-                        else:
-                            source_changed = source_changed or refreshed_changed
-                except (FileNotFoundError, OSError, RuntimeError):
-                    source_available = False
+                        source_changed = source_changed or refreshed_changed
 
             cleanup = []
             quarantine_paths = decision.get("quarantine_paths") or []
@@ -648,28 +806,16 @@ class ReviewWorker:
                     root,
                 )
             if source_available and not source_changed and not recovery_completion:
-                try:
-                    refreshed_root = source_path.resolve(strict=True)
-                    if source_path.is_symlink() or not refreshed_root.is_dir():
-                        source_available = False
-                    else:
-                        root = refreshed_root
-                        refreshed_stat = root.stat()
-                        source_changed = (
-                            source_root_identity is None
-                            or (
-                                int(refreshed_stat.st_dev),
-                                int(refreshed_stat.st_ino),
-                            )
-                            != source_root_identity
-                            or snapshot_has_new_or_replaced_paths(
-                                source_snapshot,
-                                source_identity_snapshot(root),
-                                allowed_metadata_changes=allowed_metadata_changes,
-                            )
-                        )
-                except (FileNotFoundError, OSError, RuntimeError):
-                    source_available = False
+                observation = observe_source(source_path)
+                source_available = observation is not None
+                if observation is not None:
+                    root = observation.root
+                    source_changed = not _source_unchanged(
+                        source_root_identity,
+                        source_snapshot,
+                        observation,
+                        allowed_metadata_changes=allowed_metadata_changes,
+                    )
             finalization = {}
             finalization_warnings = []
             manual_extra_files = (
@@ -700,9 +846,9 @@ class ReviewWorker:
                         "已跳过隔离和源清理"
                     )
             should_move_extra_files = bool(
-                self.review_config.get("move_extra_files")
+                effective_review_config.get("move_extra_files")
             ) or bool(manual_extra_files)
-            should_finalize = should_move_extra_files or self.review_config.get(
+            should_finalize = should_move_extra_files or effective_review_config.get(
                 "cleanup_source_after_import"
             )
             if (
@@ -721,13 +867,13 @@ class ReviewWorker:
                         extra_file_patterns=(
                             []
                             if manual_import
-                            else self.review_config.get("extra_file_patterns", [])
+                            else effective_review_config.get("extra_file_patterns", [])
                         ),
                         extra_file_paths=manual_extra_files,
                         flatten_extra_files=manual_import,
                         move_extra_files=should_move_extra_files,
                         cleanup_source_after_import=bool(
-                            self.review_config.get("cleanup_source_after_import")
+                            effective_review_config.get("cleanup_source_after_import")
                             and not recovery_completion
                         ),
                         expected_source_identities=source_snapshot,
@@ -735,19 +881,12 @@ class ReviewWorker:
                     )
                     finalization_warnings.extend(finalization.get("warnings", []))
                     if root.is_dir():
-                        refreshed_stat = root.stat()
-                        changed_during_finalization = (
-                            source_root_identity is None
-                            or (
-                                int(refreshed_stat.st_dev),
-                                int(refreshed_stat.st_ino),
-                            )
-                            != source_root_identity
-                            or snapshot_has_new_or_replaced_paths(
-                                source_snapshot,
-                                source_identity_snapshot(root),
-                                allowed_metadata_changes=allowed_metadata_changes,
-                            )
+                        observation = observe_source(source_path)
+                        changed_during_finalization = not _source_unchanged(
+                            source_root_identity,
+                            source_snapshot,
+                            observation,
+                            allowed_metadata_changes=allowed_metadata_changes,
                         )
                         if changed_during_finalization:
                             source_changed = True
@@ -794,22 +933,24 @@ class ReviewWorker:
             signature_after_import = ""
             try:
                 if source_available and not source_changed and root.is_dir():
-                    final_stat = root.stat()
-                    snapshot_before_signature = source_identity_snapshot(root)
-                    changed_before_signature = (
-                        source_root_identity is None
-                        or (int(final_stat.st_dev), int(final_stat.st_ino))
-                        != source_root_identity
-                        or snapshot_has_new_or_replaced_paths(
-                            source_snapshot,
-                            snapshot_before_signature,
-                            allowed_metadata_changes=allowed_metadata_changes,
-                        )
+                    observation = observe_source(source_path)
+                    changed_before_signature = not _source_unchanged(
+                        source_root_identity,
+                        source_snapshot,
+                        observation,
+                        allowed_metadata_changes=allowed_metadata_changes,
                     )
                     if not changed_before_signature:
+                        assert observation is not None
                         candidate_signature = source_signature(root)
-                        snapshot_after_signature = source_identity_snapshot(root)
-                        if snapshot_after_signature == snapshot_before_signature:
+                        observation_after_signature = observe_source(source_path)
+                        if (
+                            observation_after_signature is not None
+                            and observation_after_signature.root_identity
+                            == observation.root_identity
+                            and observation_after_signature.snapshot
+                            == observation.snapshot
+                        ):
                             signature_after_import = candidate_signature
                         else:
                             source_changed = True
@@ -932,8 +1073,14 @@ class ReviewWorker:
                     return_when=FIRST_COMPLETED,
                 )
                 for future in completed:
-                    futures.pop(future, None)
-                    future.result()
+                    action = futures.pop(future, "unknown")
+                    try:
+                        future.result()
+                    except Exception:
+                        self.organizer.logger.exception(
+                            "Review %s task crashed outside its job handler",
+                            action,
+                        )
         self.organizer.logger.info("Review worker stopped")
 
 
@@ -980,7 +1127,8 @@ def heartbeat_is_fresh(
 
 def main() -> int:
     if "--health" in sys.argv:
-        return 0 if heartbeat_is_fresh() else 1
+        healthy = heartbeat_is_fresh() and runtime_is_ready(CONFIG_PATH, DATABASE_PATH)
+        return 0 if healthy else 1
     worker = ReviewWorker()
     signal.signal(signal.SIGTERM, worker.request_shutdown)
     signal.signal(signal.SIGINT, worker.request_shutdown)

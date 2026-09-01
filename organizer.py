@@ -6,7 +6,8 @@ import stat
 import subprocess
 import time
 import urllib.error
-from fnmatch import fnmatch
+from datetime import datetime
+from fnmatch import fnmatchcase
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable
@@ -23,35 +24,17 @@ from music_organizer.config import (
 from music_organizer.cue import (
     CueProcessor,
     CueSplitOptions,
+    normalized_cue_file_name,
+    parse_cue,
+    resolve_cue_audio,
 )
-from music_organizer.cue import (
-    cue_output_path as build_cue_output_path,
-)
-from music_organizer.cue import (
-    cue_time_to_seconds as parse_cue_time,
-)
-from music_organizer.cue import (
-    normalized_cue_file_name as normalize_cue_file_name,
-)
-from music_organizer.cue import (
-    parse_cue as parse_cue_file,
-)
-from music_organizer.cue import (
-    parse_cue_value as parse_cue_text_value,
-)
-from music_organizer.cue import (
-    read_cue_text as read_cue_file_text,
-)
-from music_organizer.cue import (
-    resolve_cue_audio as find_cue_audio,
-)
-from music_organizer.cue import (
-    sanitize_filename as clean_filename,
-)
-from music_organizer.cue import (
-    seconds_arg as format_seconds,
-)
+from music_organizer.file_compare import stable_regular_files_equal
+from music_organizer.logs import tail_lines
 from music_organizer.models import CueSheet, CueTrack, RunResult
+from music_organizer.pathsafe import (
+    reject_symlink_components as reject_path_symlinks,
+)
+from music_organizer.pathsafe import resolve_confined, resolve_root
 from music_organizer.qbittorrent import QBittorrentClient
 from music_organizer.repository import OrganizerRepository, SQLiteOrganizerRepository
 
@@ -122,6 +105,8 @@ class MusicOrganizer:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             **popen_kwargs,
         )
 
@@ -243,9 +228,12 @@ class MusicOrganizer:
         if ext in excluded_exts:
             return True
 
-        rel_with_slashes = f"{rel}/" if path.is_dir() else rel
+        rel_with_slashes = (f"{rel}/" if path.is_dir() else rel).casefold()
         for pattern in config["exclude"].get("globs", []):
-            if fnmatch(rel_with_slashes, pattern) or fnmatch(f"/{rel_with_slashes}", pattern):
+            normalized_pattern = str(pattern).casefold()
+            if fnmatchcase(rel_with_slashes, normalized_pattern) or fnmatchcase(
+                f"/{rel_with_slashes}", normalized_pattern
+            ):
                 return True
         return False
 
@@ -254,9 +242,12 @@ class MusicOrganizer:
         if not include_globs:
             return True
 
-        rel = path.relative_to(source_root).as_posix()
+        rel = path.relative_to(source_root).as_posix().casefold()
         for pattern in include_globs:
-            if fnmatch(rel, pattern) or fnmatch(f"/{rel}", pattern):
+            normalized_pattern = str(pattern).casefold()
+            if fnmatchcase(rel, normalized_pattern) or fnmatchcase(
+                f"/{rel}", normalized_pattern
+            ):
                 return True
         return False
 
@@ -326,16 +317,14 @@ class MusicOrganizer:
             kept_dirs = []
             for dirname in dirnames:
                 dir_path = root_path / dirname
-                if dir_path.is_symlink():
-                    continue
                 try:
+                    metadata = dir_path.stat(follow_symlinks=False)
+                    if not stat.S_ISDIR(metadata.st_mode):
+                        continue
                     resolved_dir = dir_path.resolve(strict=True)
                 except (OSError, RuntimeError):
                     continue
-                if not (
-                    resolved_dir.is_dir()
-                    and resolved_dir.is_relative_to(rules_root)
-                ):
+                if not resolved_dir.is_relative_to(rules_root):
                     continue
                 if self.should_exclude(dir_path, rules_root, config):
                     self.logger.debug("Excluded directory: %s", dir_path)
@@ -345,16 +334,14 @@ class MusicOrganizer:
 
             for filename in filenames:
                 file_path = root_path / filename
-                if file_path.is_symlink():
-                    continue
                 try:
+                    metadata = file_path.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(metadata.st_mode):
+                        continue
                     resolved_file = file_path.resolve(strict=True)
                 except (OSError, RuntimeError):
                     continue
-                if not (
-                    resolved_file.is_file()
-                    and resolved_file.is_relative_to(rules_root)
-                ):
+                if not resolved_file.is_relative_to(rules_root):
                     continue
                 if self.should_exclude(file_path, rules_root, config):
                     self.logger.debug("Excluded file: %s", file_path)
@@ -386,29 +373,11 @@ class MusicOrganizer:
 
     @staticmethod
     def reject_symlink_components(path: Path) -> None:
-        if not path.is_absolute():
-            raise ValueError(f"Target path must be absolute: {path}")
-        current = Path(path.anchor)
-        for part in path.parts[1:]:
-            if part in {"", ".", ".."}:
-                raise ValueError(f"Unsafe target path component: {path}")
-            current = current / part
-            if current.is_symlink():
-                raise ValueError(f"Target path contains a symlink: {current}")
+        reject_path_symlinks(path, label="Target path")
 
     @classmethod
     def prepare_target_root(cls, target_root: Path, *, create: bool) -> Path:
-        cls.reject_symlink_components(target_root)
-        if create:
-            target_root.mkdir(parents=True, exist_ok=True)
-        cls.reject_symlink_components(target_root)
-        resolved = target_root.resolve(strict=True)
-        cls.reject_symlink_components(target_root)
-        if resolved != target_root.absolute():
-            raise ValueError(f"Target root is redirected: {target_root}")
-        if not resolved.is_dir():
-            raise ValueError(f"Target root is not a directory: {target_root}")
-        return resolved
+        return resolve_root(target_root, create=create, label="Target root")
 
     @classmethod
     def validated_target_path(
@@ -419,47 +388,14 @@ class MusicOrganizer:
         create_parent: bool,
     ) -> Path:
         resolved_root = cls.prepare_target_root(target_root, create=False)
-        try:
-            relative = target_file.relative_to(target_root)
-        except ValueError:
-            try:
-                relative = target_file.relative_to(resolved_root)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Target path is outside the configured root: {target_file}"
-                ) from exc
-        if not relative.parts or any(
-            part in {"", ".", ".."} for part in relative.parts
-        ):
-            raise ValueError(f"Unsafe target path: {target_file}")
-
-        candidate = resolved_root.joinpath(*relative.parts)
-        current = resolved_root
-        for index, part in enumerate(relative.parts):
-            current = current / part
-            if current.is_symlink():
-                raise ValueError(f"Target path contains a symlink: {current}")
-            if not os.path.lexists(current):
-                continue
-            resolved = current.resolve(strict=True)
-            if resolved != current.absolute():
-                raise ValueError(f"Target path is redirected: {current}")
-            if not resolved.is_relative_to(resolved_root):
-                raise ValueError(
-                    f"Target path is outside the configured root: {current}"
-                )
-            if index < len(relative.parts) - 1 and not resolved.is_dir():
-                raise ValueError(f"Target parent is not a directory: {current}")
-            current = resolved
-
-        if create_parent:
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-            return cls.validated_target_path(
-                candidate,
-                resolved_root,
-                create_parent=False,
-            )
-        return current
+        return resolve_confined(
+            resolved_root,
+            target_file,
+            must_exist=False,
+            allow_root=False,
+            create_parent=create_parent,
+            label="Target path",
+        )
 
     def transfer(
         self,
@@ -543,137 +479,11 @@ class MusicOrganizer:
         *,
         chunk_size: int = 1024 * 1024,
     ) -> bool:
-        """Return true only for stable regular files with identical contents.
-
-        This is intentionally used only for the copy-mode crash window where the
-        destination was committed to disk before its database row.  Rechecking
-        both descriptors and paths after the comparison prevents an ordinary
-        concurrent sync from being mistaken for a completed copy.
-        """
-
-        def descriptor_fingerprint(
-            value: os.stat_result,
-        ) -> tuple[int, int, int, int, int]:
-            return (
-                value.st_dev,
-                value.st_ino,
-                value.st_size,
-                value.st_mtime_ns,
-                value.st_ctime_ns,
-            )
-
-        def path_matches_descriptor(
-            path_value: os.stat_result,
-            descriptor_value: os.stat_result,
-        ) -> bool:
-            # Windows can expose a different ctime view through stat() and
-            # fstat() for the same open file. Compare ctime only between two
-            # descriptor snapshots; path identity still includes dev/inode,
-            # size and mtime before and after the content comparison.
-            return (
-                path_value.st_dev,
-                path_value.st_ino,
-                path_value.st_size,
-                path_value.st_mtime_ns,
-            ) == (
-                descriptor_value.st_dev,
-                descriptor_value.st_ino,
-                descriptor_value.st_size,
-                descriptor_value.st_mtime_ns,
-            )
-
-        try:
-            source_before = source_file.stat(follow_symlinks=False)
-            target_before = target_file.stat(follow_symlinks=False)
-            if not stat.S_ISREG(source_before.st_mode) or not stat.S_ISREG(
-                target_before.st_mode
-            ):
-                return False
-            if source_before.st_size != target_before.st_size:
-                return False
-
-            with source_file.open("rb") as source_handle, target_file.open(
-                "rb"
-            ) as target_handle:
-                source_descriptor_before = os.fstat(source_handle.fileno())
-                target_descriptor_before = os.fstat(target_handle.fileno())
-                while True:
-                    source_chunk = source_handle.read(chunk_size)
-                    target_chunk = target_handle.read(chunk_size)
-                    if source_chunk != target_chunk:
-                        return False
-                    if not source_chunk:
-                        break
-                source_descriptor_after = os.fstat(source_handle.fileno())
-                target_descriptor_after = os.fstat(target_handle.fileno())
-
-            source_path_after = source_file.stat(follow_symlinks=False)
-            target_path_after = target_file.stat(follow_symlinks=False)
-        except OSError:
-            return False
-
-        return (
-            path_matches_descriptor(source_before, source_descriptor_before)
-            and path_matches_descriptor(
-                source_path_after, source_descriptor_after
-            )
-            and descriptor_fingerprint(source_descriptor_before)
-            == descriptor_fingerprint(source_descriptor_after)
-            and path_matches_descriptor(target_before, target_descriptor_before)
-            and path_matches_descriptor(
-                target_path_after, target_descriptor_after
-            )
-            and descriptor_fingerprint(target_descriptor_before)
-            == descriptor_fingerprint(target_descriptor_after)
+        return stable_regular_files_equal(
+            source_file,
+            target_file,
+            chunk_size=chunk_size,
         )
-
-    @staticmethod
-    def parse_cue_value(value: str) -> str:
-        return parse_cue_text_value(value)
-
-    @staticmethod
-    def cue_time_to_seconds(value: str) -> float:
-        return parse_cue_time(value)
-
-    @staticmethod
-    def read_cue_text(cue_path: Path) -> str:
-        return read_cue_file_text(cue_path)
-
-    @staticmethod
-    def parse_cue(cue_path: Path) -> CueSheet:
-        return parse_cue_file(cue_path)
-
-    @staticmethod
-    def sanitize_filename(value: str, fallback: str) -> str:
-        return clean_filename(value, fallback)
-
-    @staticmethod
-    def resolve_cue_audio(cue_path: Path, file_name: str) -> Path | None:
-        return find_cue_audio(cue_path, file_name)
-
-    @staticmethod
-    def normalized_cue_file_name(file_name: str) -> str:
-        return normalize_cue_file_name(file_name)
-
-    @staticmethod
-    def cue_output_path(
-        target_cue: Path,
-        track: CueTrack,
-        sheet: CueSheet,
-        cue_config: dict[str, Any],
-        total_tracks: int,
-    ) -> Path:
-        return build_cue_output_path(
-            target_cue,
-            track,
-            sheet,
-            CueSplitOptions.from_mapping(cue_config),
-            total_tracks,
-        )
-
-    @staticmethod
-    def seconds_arg(value: float) -> str:
-        return format_seconds(value)
 
     def run_ffmpeg_split(
         self,
@@ -773,7 +583,7 @@ class MusicOrganizer:
                     continue
 
                 try:
-                    sheet = self.parse_cue(source_cue)
+                    sheet = parse_cue(source_cue)
                     self._cue_sheet_cache[source_cue] = sheet
                 except Exception as exc:
                     self.logger.warning("Failed to parse CUE for source-audio skip: %s (%s)", source_cue, exc)
@@ -781,7 +591,7 @@ class MusicOrganizer:
 
                 tracks = sheet.tracks or []
                 cue_files = {
-                    self.normalized_cue_file_name(track.file_name)
+                    normalized_cue_file_name(track.file_name)
                     for track in tracks
                     if track.file_name.strip()
                 }
@@ -789,7 +599,7 @@ class MusicOrganizer:
                     continue
 
                 for track in tracks:
-                    audio_source = self.resolve_cue_audio(source_cue, track.file_name)
+                    audio_source = resolve_cue_audio(source_cue, track.file_name)
                     if audio_source:
                         image_audio_sources.add(str(audio_source))
                         break
@@ -912,7 +722,22 @@ class MusicOrganizer:
             password=str(qb_config.get("password") or ""),
             api_key=str(qb_config.get("api_key") or ""),
             timeout=int(qb_config.get("timeout", 10) or 10),
+            max_attempts=int(qb_config.get("network_max_attempts", 3) or 3),
+            retry_base_seconds=float(
+                qb_config.get("network_retry_seconds", 1) or 0
+            ),
+            retry_max_seconds=float(
+                qb_config.get("network_retry_max_seconds", 5) or 0
+            ),
         )
+
+    def record_qb_connection_status(self, status: str, error: str = "") -> None:
+        now = datetime.now().isoformat(timespec="seconds")
+        self.set_app_state_value("qb_last_attempt_at", now)
+        self.set_app_state_value("qb_last_status", status)
+        self.set_app_state_value("qb_last_error", error[:500])
+        if status == "ok":
+            self.set_app_state_value("qb_last_success_at", now)
 
     def pending_qb_torrents(
         self, config: dict[str, Any]
@@ -976,8 +801,11 @@ class MusicOrganizer:
             pending, next_rid, has_deferred = self.pending_qb_torrents(config)
         except (urllib.error.URLError, TimeoutError, RuntimeError, ValueError) as exc:
             message = f"qBittorrent poll failed: {exc}"
+            self.record_qb_connection_status("failed", str(exc))
             self.logger.warning(message)
             return RunResult(failed=1, message=message)
+
+        self.record_qb_connection_status("ok")
 
         if not pending:
             if next_rid is not None and not has_deferred:
@@ -1268,9 +1096,19 @@ class MusicOrganizer:
                 )
             self.finish_run(run_id, result)
 
-    def stats(self) -> dict[str, Any]:
-        config = self.load_config()
-        snapshot = self.repository.dashboard_snapshot()
+    def stats(
+        self,
+        *,
+        config: dict[str, Any] | None = None,
+        snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        config = config or self.load_config()
+        snapshot = snapshot or self.repository.dashboard_snapshot()
+        public_snapshot = {
+            key: value
+            for key, value in snapshot.items()
+            if key not in {"app_state", "job_status", "review_counts"}
+        }
         qbittorrent = dict(config.get("qbittorrent", {}))
         qbittorrent.pop("password", None)
         qbittorrent.pop("api_key", None)
@@ -1278,14 +1116,10 @@ class MusicOrganizer:
             "paths_mapping": config.get("paths_mapping", {}),
             "mode": config.get("mode", "hardlink"),
             "qbittorrent": qbittorrent,
-            **snapshot,
+            **public_snapshot,
         }
 
     def history(self, page: int = 1, per_page: int = 50, query: str = "") -> dict[str, Any]:
         return self.repository.history(page, per_page, query)
     def recent_logs(self, limit: int = 200) -> list[str]:
-        if not self.log_path.exists():
-            return []
-        with self.log_path.open("r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.readlines()
-        return [line.rstrip("\n") for line in lines[-limit:]]
+        return tail_lines(self.log_path, limit)

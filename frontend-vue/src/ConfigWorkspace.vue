@@ -1,7 +1,8 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { BellRing, CheckCircle2, LoaderCircle, Save } from '@lucide/vue'
+import { BellRing, CheckCircle2, Download, FolderTree, Languages, Library, LoaderCircle, Save, Settings2 } from '@lucide/vue'
 import ConfigField from './ConfigField.vue'
+import ConfigSourceProfiles from './ConfigSourceProfiles.vue'
 import { getConfig, saveConfig, testMagicPush } from './api'
 
 const props = defineProps({ refreshKey: { type: Number, default: 0 } })
@@ -12,9 +13,19 @@ const loading = ref(true)
 const saving = ref(false)
 const testingPush = ref(false)
 const feedback = ref({ tone: '', message: '' })
+const activeCategory = ref('directories')
+
+const categories = [
+  { id: 'directories', label: '目录方案', icon: FolderTree },
+  { id: 'library', label: '入库与音频', icon: Library },
+  { id: 'lyrics', label: '识别与歌词', icon: Languages },
+  { id: 'download', label: '下载器', icon: Download },
+  { id: 'advanced', label: '通知与系统', icon: Settings2 },
+]
 
 const sections = [
   {
+    group: 'library',
     title: '路径与转移方式', eyebrow: 'TRANSFER',
     fields: [
       { name: 'paths_mapping', label: '路径映射', type: 'textarea', rows: 4, wide: true, help: '每行一组：源路径 => 目标路径' },
@@ -24,6 +35,7 @@ const sections = [
     ],
   },
   {
+    group: 'library',
     title: '扫描包含与排除规则', eyebrow: 'FILTERS',
     fields: [
       { name: 'include_globs', label: '包含 glob', type: 'textarea', rows: 5, help: '留空表示全部扫描。' },
@@ -33,6 +45,7 @@ const sections = [
     ],
   },
   {
+    group: 'library',
     title: 'CUE 切分', eyebrow: 'AUDIO PIPELINE',
     fields: [
       { name: 'cue_split_enabled', label: '切分状态', type: 'checkbox', checkboxLabel: '启用 CUE 切分' },
@@ -46,6 +59,7 @@ const sections = [
     ],
   },
   {
+    group: 'download',
     title: 'qBittorrent 主动联动', eyebrow: 'QBITTORRENT',
     fields: [
       { name: 'qb_enabled', label: '联动状态', type: 'checkbox', checkboxLabel: '启用主动检查' },
@@ -62,30 +76,39 @@ const sections = [
     ],
   },
   {
-    title: '音乐预审', eyebrow: 'REVIEW WORKSPACE',
+    group: 'directories',
+    title: '预审与目标库', eyebrow: 'REVIEW WORKSPACE',
     fields: [
       { name: 'review_enabled', label: '预审状态', type: 'checkbox', checkboxLabel: '启用音乐预审' },
-      { name: 'review_auto_discover', label: '自动发现', type: 'checkbox', checkboxLabel: '自动扫描 Inbox' },
-      { name: 'review_discovery_interval_seconds', label: '发现间隔秒数', type: 'number', min: 5, max: 3600 },
+      { name: 'review_discovery_interval_seconds', label: '发现间隔秒数', type: 'number', min: 30, max: 3600 },
       { name: 'review_discovery_stable_seconds', label: '稳定等待秒数', type: 'number', min: 10, max: 86400 },
+      { name: 'review_directory', label: '入库目标目录', wide: true },
+      { name: 'review_recycle_directory', label: '群晖回收站目录', wide: true },
+    ],
+  },
+  {
+    group: 'lyrics',
+    title: '识别与标签', eyebrow: 'METADATA',
+    fields: [
       { name: 'review_identify_workers', label: '识别并发数', type: 'number', min: 1, max: 8 },
       { name: 'review_proxy_url', label: 'HTTP 代理' },
       { name: 'review_proxy_username', label: '代理账号' },
       { name: 'review_proxy_password', label: '代理密码', type: 'password', secret: true },
-      { name: 'review_source_roots', label: '允许选择的 Inbox 目录', type: 'textarea', rows: 3, wide: true, help: '每行一个容器内绝对路径。' },
-      { name: 'review_directory', label: '入库目标目录', wide: true },
-      { name: 'review_recycle_directory', label: '回收目录', wide: true },
-      { name: 'review_library', label: 'Library DB' },
-      { name: 'review_config_path', label: 'beets Config 路径' },
-      { name: 'review_import_mode', label: '入库方式', type: 'select', options: [{ value: 'hardlink', label: 'hardlink' }, { value: 'copy', label: 'copy' }, { value: 'move', label: 'move' }] },
       { name: 'review_write_tags', label: '标签处理', type: 'checkbox', checkboxLabel: '写入文件标签' },
-      { name: 'review_move_extra_files', label: '附加文件', type: 'checkbox', checkboxLabel: '移动匹配的附加文件' },
-      { name: 'review_cleanup_source_after_import', label: '源目录清理', type: 'checkbox', checkboxLabel: '删除已入库源文件和空目录' },
-      { name: 'review_extra_file_patterns', label: '附加文件匹配', placeholder: '*.jpg *.png' },
       { name: 'review_path_format', label: '路径模板（Picard 预设 3）', wide: true },
+      { name: 'review_extra_file_patterns', label: '附加文件匹配', placeholder: '*.jpg *.png' },
     ],
   },
   {
+    group: 'advanced',
+    title: 'beets 运行数据', eyebrow: 'ADVANCED',
+    fields: [
+      { name: 'review_library', label: 'Library DB' },
+      { name: 'review_config_path', label: 'beets Config 路径' },
+    ],
+  },
+  {
+    group: 'lyrics',
     title: 'AI 歌词翻译', eyebrow: 'LYRICS AI',
     fields: [
       { name: 'translation_enabled', label: '翻译状态', type: 'checkbox', checkboxLabel: '启用日文歌词 AI 翻译' },
@@ -97,6 +120,7 @@ const sections = [
     ],
   },
   {
+    group: 'advanced',
     title: 'MagicPush 整理通知', eyebrow: 'NOTIFICATIONS', action: 'magicpush',
     fields: [
       { name: 'magicpush_enabled', label: '通知状态', type: 'checkbox', checkboxLabel: '启用任务结果推送' },
@@ -108,6 +132,7 @@ const sections = [
     ],
   },
   {
+    group: 'advanced',
     title: '定时扫描与日志', eyebrow: 'OPERATIONS',
     fields: [
       { name: 'schedule_cron', label: 'Cron' },
@@ -119,10 +144,12 @@ const sections = [
 ]
 
 const booleanFields = new Set(sections.flatMap((section) => section.fields).filter((field) => field.type === 'checkbox').map((field) => field.name))
+const visibleSections = computed(() => sections.filter((section) => section.group === activeCategory.value))
 const dirty = computed(() => !loading.value && JSON.stringify(form.value) !== baseline.value)
 
 function applyPayload(payload) {
   form.value = { ...(payload.values || {}) }
+  if (!Array.isArray(form.value.review_source_profiles)) form.value.review_source_profiles = []
   saved.value = { ...(payload.saved || {}) }
   baseline.value = JSON.stringify(form.value)
 }
@@ -146,6 +173,8 @@ async function submit() {
   for (const [name, value] of Object.entries(form.value)) {
     if (booleanFields.has(name)) {
       if (value) payload.append(name, 'on')
+    } else if (Array.isArray(value)) {
+      payload.append(name, JSON.stringify(value))
     } else {
       payload.append(name, value == null ? '' : String(value))
     }
@@ -187,7 +216,15 @@ onMounted(load)
     <p v-if="feedback.message" class="config-feedback" :class="feedback.tone" role="status">{{ feedback.message }}</p>
     <div v-if="loading" class="config-loading"><LoaderCircle :size="20" class="spinning" />正在读取配置…</div>
     <form v-else @submit.prevent="submit">
-      <article v-for="section in sections" :key="section.title" class="config-section card">
+      <nav class="config-categories" aria-label="配置分类">
+        <button v-for="category in categories" :key="category.id" type="button" :class="{ active: activeCategory === category.id }" @click="activeCategory = category.id">
+          <component :is="category.icon" :size="16" /><span>{{ category.label }}</span>
+        </button>
+      </nav>
+      <article v-if="activeCategory === 'directories'" class="config-section card">
+        <ConfigSourceProfiles v-model="form.review_source_profiles" />
+      </article>
+      <article v-for="section in visibleSections" :key="section.title" class="config-section card">
         <header><div><small>{{ section.eyebrow }}</small><h2>{{ section.title }}</h2></div>
           <button v-if="section.action === 'magicpush'" type="button" class="config-secondary" :disabled="testingPush" @click="sendTestPush"><BellRing :size="15" />发送测试推送</button>
         </header>

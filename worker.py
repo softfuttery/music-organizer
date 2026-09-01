@@ -6,6 +6,7 @@ import argparse
 import os
 import signal
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -15,6 +16,7 @@ from apscheduler.triggers.cron import CronTrigger
 from music_organizer.models import RunResult
 from music_organizer.notifications import format_job_notification, send_magicpush
 from music_organizer.repository import SQLiteOrganizerRepository
+from music_organizer.runtime import runtime_is_ready
 from organizer import MusicOrganizer
 
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/config/config.yaml"))
@@ -25,6 +27,7 @@ HEARTBEAT_MAX_AGE_SECONDS = max(
     int(os.environ.get("WORKER_HEARTBEAT_MAX_AGE_SECONDS", "30")), 5
 )
 JOB_HEARTBEAT_SECONDS = max(1.0, min(HEARTBEAT_MAX_AGE_SECONDS / 3, 10.0))
+HEARTBEAT_WRITE_SECONDS = JOB_HEARTBEAT_SECONDS
 
 
 class OrganizerWorker:
@@ -33,6 +36,7 @@ class OrganizerWorker:
         self.repository.initialize()
         self.repository.recover_interrupted_work()
         self.shutdown_requested = threading.Event()
+        self._next_heartbeat_at = 0.0
         self.timezone = ZoneInfo(os.environ.get("TZ", "Asia/Hong_Kong"))
         self.organizer = MusicOrganizer(
             str(CONFIG_PATH),
@@ -42,9 +46,13 @@ class OrganizerWorker:
             cancel_check=self.shutdown_requested.is_set,
         )
     def heartbeat(self) -> None:
+        now = time.monotonic()
+        if now < self._next_heartbeat_at:
+            return
         self.repository.set_app_state_value(
             "worker_heartbeat", datetime.now().isoformat(timespec="seconds")
         )
+        self._next_heartbeat_at = now + HEARTBEAT_WRITE_SECONDS
 
     def _safe_heartbeat(self) -> None:
         try:
@@ -264,7 +272,10 @@ def main() -> int:
     if args.health:
         repository = SQLiteOrganizerRepository(DATABASE_PATH)
         repository.initialize()
-        return 0 if heartbeat_is_fresh(repository) else 1
+        healthy = heartbeat_is_fresh(repository) and runtime_is_ready(
+            CONFIG_PATH, DATABASE_PATH
+        )
+        return 0 if healthy else 1
     worker = OrganizerWorker()
     if args.once:
         worker.run_once()

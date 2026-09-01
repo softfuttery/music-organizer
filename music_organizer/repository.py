@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
+from .database import schema_upgrade
 from .models import RunResult
 
 
@@ -58,6 +59,7 @@ class OrganizerRepository(Protocol):
     ) -> dict[str, str]: ...
     def reset_qb_torrent_retry(self, torrent_hash: str) -> bool: ...
     def dashboard_snapshot(self) -> dict[str, Any]: ...
+    def dashboard_runtime_snapshot(self) -> dict[str, Any]: ...
     def history(self, page: int, per_page: int, query: str) -> dict[str, Any]: ...
     def enqueue_job(self, job_type: str) -> tuple[bool, dict[str, Any]]: ...
     def claim_next_job(self) -> dict[str, Any] | None: ...
@@ -88,8 +90,17 @@ class SQLiteOrganizerRepository:
 
     def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connection() as conn:
+        with (
+            schema_upgrade(
+                self.database_path,
+                "organizer",
+                1,
+                ("organized_files", "runs", "qb_torrents", "jobs"),
+            ),
+            self._connection() as conn,
+        ):
             conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS organized_files (
@@ -758,32 +769,36 @@ class SQLiteOrganizerRepository:
 
     def dashboard_snapshot(self) -> dict[str, Any]:
         with self._connection() as conn:
-            total_files = int(
-                conn.execute("SELECT COUNT(*) AS count FROM organized_files").fetchone()[
-                    "count"
-                ]
-            )
-            success_files = int(
-                conn.execute(
-                    "SELECT COUNT(*) AS count FROM organized_files WHERE status = 'success'"
-                ).fetchone()["count"]
-            )
-            last_run = conn.execute(
-                "SELECT * FROM runs ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            recent = conn.execute(
-                "SELECT * FROM organized_files ORDER BY id DESC LIMIT 10"
-            ).fetchall()
-            recent_qb_torrents = conn.execute(
-                "SELECT * FROM qb_torrents ORDER BY id DESC LIMIT 10"
-            ).fetchall()
-            qb_needs_attention = conn.execute(
-                """
-                SELECT * FROM qb_torrents
-                WHERE status = 'needs_attention'
-                ORDER BY id DESC LIMIT 20
-                """
-            ).fetchall()
+            return self._dashboard_snapshot(conn)
+
+    @staticmethod
+    def _dashboard_snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
+        total_files = int(
+            conn.execute("SELECT COUNT(*) AS count FROM organized_files").fetchone()[
+                "count"
+            ]
+        )
+        success_files = int(
+            conn.execute(
+                "SELECT COUNT(*) AS count FROM organized_files WHERE status = 'success'"
+            ).fetchone()["count"]
+        )
+        last_run = conn.execute(
+            "SELECT * FROM runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        recent = conn.execute(
+            "SELECT * FROM organized_files ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+        recent_qb_torrents = conn.execute(
+            "SELECT * FROM qb_torrents ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+        qb_needs_attention = conn.execute(
+            """
+            SELECT * FROM qb_torrents
+            WHERE status = 'needs_attention'
+            ORDER BY id DESC LIMIT 20
+            """
+        ).fetchall()
         return {
             "total_files": total_files,
             "organized_files": success_files,
@@ -792,6 +807,39 @@ class SQLiteOrganizerRepository:
             "recent_qb_torrents": [dict(row) for row in recent_qb_torrents],
             "qb_needs_attention": [dict(row) for row in qb_needs_attention],
         }
+
+    def dashboard_runtime_snapshot(self) -> dict[str, Any]:
+        """Read the complete dashboard state through one SQLite connection."""
+        with self._connection() as conn:
+            snapshot = self._dashboard_snapshot(conn)
+            state = {
+                str(row["key"]): str(row["value"])
+                for row in conn.execute("SELECT key, value FROM app_state").fetchall()
+            }
+            job = conn.execute(
+                "SELECT * FROM jobs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            review_counts = {"active": 0, "archived": 0}
+            review_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'review_items'"
+            ).fetchone()
+            if review_table is not None:
+                row = conn.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN archived_at = '' THEN 1 ELSE 0 END) AS active,
+                        SUM(CASE WHEN archived_at <> '' THEN 1 ELSE 0 END) AS archived
+                    FROM review_items
+                    """
+                ).fetchone()
+                review_counts = {
+                    "active": int(row["active"] or 0),
+                    "archived": int(row["archived"] or 0),
+                }
+            snapshot["app_state"] = state
+            snapshot["job_status"] = self._job_payload(job)
+            snapshot["review_counts"] = review_counts
+            return snapshot
 
     def history(self, page: int, per_page: int, query: str) -> dict[str, Any]:
         page = max(page, 1)

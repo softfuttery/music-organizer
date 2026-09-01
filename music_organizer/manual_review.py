@@ -8,7 +8,7 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from .review import AUDIO_EXTENSIONS, audio_files
+from .review import audio_files, auxiliary_files
 
 MANUAL_CANDIDATE_KEY = "manual:filename-rules"
 UNCLASSIFIED_DIRECTORY = "未分类"
@@ -96,16 +96,6 @@ def _relative_audio_files(source_root: Path) -> dict[str, Path]:
         path.relative_to(source_root).as_posix(): path
         for path in audio_files(source_root)
     }
-
-
-def _auxiliary_files(source_root: Path) -> list[str]:
-    return sorted(
-        path.relative_to(source_root).as_posix()
-        for path in source_root.rglob("*")
-        if path.is_file()
-        and not path.is_symlink()
-        and path.suffix.lower() not in AUDIO_EXTENSIONS
-    )
 
 
 def build_manual_candidate(
@@ -226,7 +216,7 @@ def build_manual_candidate(
         "track_options": tracks,
         "extra_items": [path for path in available if path not in mapped],
         "extra_tracks": [],
-        "auxiliary_files": _auxiliary_files(root),
+        "auxiliary_files": auxiliary_files(root),
         "unclassified_directory": UNCLASSIFIED_DIRECTORY,
         "destination_relative_directory": destination_directory.as_posix(),
         "artist_directory_name": destination_directory.parts[1],

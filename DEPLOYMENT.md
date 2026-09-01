@@ -40,7 +40,8 @@ mode: copy
 ```
 
 Linux 主机还应让容器用户能够读写部署目录。默认容器用户是 `1026:100`，可在 `.env` 中
-用 `APP_UID` 和 `APP_GID` 改成宿主机用户的 UID/GID。
+用 `APP_UID` 和 `APP_GID` 改成宿主机用户的 UID/GID。媒体目录依赖附加 ACL 组时，
+通过 `WEB_EXTRA_GID` 设置；该附加组会同时应用于 Web 和两个 Worker。
 
 ```bash
 sudo chown -R "${APP_UID:-1026}:${APP_GID:-100}" config data secrets media

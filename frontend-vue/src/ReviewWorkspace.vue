@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   Archive,
   Check,
+  ChevronLeft,
   ChevronRight,
   Folder,
   FolderInput,
@@ -42,20 +43,11 @@ import {
 import { applyAudioPreferences, saveAudioPreferences } from './audio-preferences'
 import {
   hasTextDecodeDamage,
-  highConfidenceLyricCandidate,
+  highConfidenceLyricCandidates,
   lyricCandidateTitle,
   lyricCandidateMatchSummary,
   lyricQualitySummary,
-  parseSyncedLyrics,
-  plainLyricLines,
-  scrollLyricContainer,
 } from './lyric-editor-state'
-import {
-  adjustLyricsOffset,
-  compressBlankLines,
-  convertLyricsToSimplified,
-  standardizeLyrics,
-} from './lyric-processing'
 import {
   focusModal,
   lockBodyScroll,
@@ -69,6 +61,7 @@ import {
   reconcilePolledItem,
 } from './requestState'
 import { useAdaptivePolling } from './useAdaptivePolling'
+import { useLyricEditor } from './useLyricEditor'
 import {
   reviewMappingConfidence,
   sortReviewLocalItems,
@@ -80,8 +73,13 @@ const expandedDirectories = ref(new Set())
 const directoryPreviews = ref({})
 const previewLoading = ref(new Set())
 const batches = ref([])
+const batchListPagination = ref(null)
 const activeBatch = ref(null)
 const selectedBatchId = ref(null)
+const batchListOffset = ref(0)
+const batchListPageSize = 30
+const batchOffset = ref(0)
+const batchPageSize = 20
 const scope = ref('active')
 const counts = ref({ active: 0, archived: 0 })
 const archiveQuery = ref('')
@@ -104,14 +102,37 @@ const lyricContent = ref('')
 const lyricSelection = ref(null)
 const lyricDirty = ref(false)
 const lyricTab = ref('lyrics')
-const lyricAutoFollow = ref(true)
-const preserveWordTiming = ref(true)
-const lyricOffset = ref(0)
-const playbackTime = ref(0)
-const lastActiveLyricIndex = ref(-1)
 const lyricList = ref(null)
 const lyricDrawer = ref(null)
 const lyricAudio = ref(null)
+const {
+  activeLyricIndex,
+  handleLyricScrollKey,
+  handlePanelTabKey,
+  lyricAutoFollow,
+  lyricOffset,
+  parsedLyrics,
+  pauseLyricFollow,
+  preserveWordTiming,
+  processLyrics,
+  resetLyricPlayback,
+  resumeLyricFollow,
+  seekLyrics: seekToLyric,
+  selectPanel: selectLyricTab,
+  syncLyrics,
+  unsyncedLyricLines,
+} = useLyricEditor({
+  content: lyricContent,
+  activePanel: lyricTab,
+  list: lyricList,
+  audio: lyricAudio,
+  drawer: lyricDrawer,
+  feedback: lyricFeedback,
+  processedMessage: '点击“采用此歌词”后才会保存。',
+  onContentChanged: () => {
+    lyricDirty.value = true
+  },
+})
 let lyricReturnFocus = null
 let releaseLyricBodyLock = null
 let archiveSearchTimer = null
@@ -130,6 +151,20 @@ const lyricTextDamaged = computed(() => hasTextDecodeDamage(
 ))
 
 const selectedCount = computed(() => selected.value.size)
+const batchListPage = computed(() => (
+  Math.floor((batchListOffset.value || 0) / batchListPageSize) + 1
+))
+const batchListPages = computed(() => Math.max(
+  1,
+  Math.ceil((batchListPagination.value?.total || 0) / batchListPageSize),
+))
+const batchPage = computed(() => (
+  Math.floor((activeBatch.value?.pagination?.offset || 0) / batchPageSize) + 1
+))
+const batchPages = computed(() => Math.max(
+  1,
+  Math.ceil((activeBatch.value?.pagination?.total || 0) / batchPageSize),
+))
 const currentLyricDecision = computed(() => {
   if (!lyricPanel.value) return null
   return lyricPanel.value.item.lyrics?.[lyricPanel.value.local.local_path] || null
@@ -159,7 +194,12 @@ async function refresh() {
   const requestedScope = scope.value
   const requestedQuery = requestedScope === 'archived' ? archiveQuery.value.trim() : ''
   try {
-    const response = await getReviewBatches(requestedScope, requestedQuery)
+    const response = await getReviewBatches(
+      requestedScope,
+      requestedQuery,
+      batchListOffset.value,
+      batchListPageSize,
+    )
     if (
       !viewRequests.isCurrent(requestToken)
       || scope.value !== requestedScope
@@ -168,8 +208,15 @@ async function refresh() {
     const currentId = selectedBatchId.value ?? activeBatch.value?.id
     const nextBatch = response.batches.find((batch) => batch.id === currentId)
       || response.batches[0]
+    const nextOffset = nextBatch?.id === currentId ? batchOffset.value : 0
     const nextActiveBatch = nextBatch
-      ? await getReviewBatch(nextBatch.id, requestedScope, requestedQuery)
+      ? await getReviewBatch(
+        nextBatch.id,
+        requestedScope,
+        requestedQuery,
+        nextOffset,
+        batchPageSize,
+      )
       : null
     if (
       !viewRequests.isCurrent(requestToken)
@@ -177,8 +224,11 @@ async function refresh() {
       || (requestedScope === 'archived' && archiveQuery.value.trim() !== requestedQuery)
     ) return
     batches.value = response.batches
+    batchListPagination.value = response.pagination || null
+    batchListOffset.value = response.pagination?.offset || 0
     counts.value = response.counts || counts.value
     selectedBatchId.value = nextBatch?.id ?? null
+    batchOffset.value = nextActiveBatch?.pagination?.offset || 0
     if (nextActiveBatch?.items && lyricPanel.value?.item) {
       nextActiveBatch.items = reconcilePolledItem(
         nextActiveBatch.items,
@@ -233,8 +283,8 @@ async function toggleDirectoryPreview(path) {
 const reviewPollDelay = () => {
   const activeStatuses = new Set(['queued', 'identifying', 'approved', 'importing'])
   return activeBatch.value?.items?.some((item) => activeStatuses.has(item.status))
-    ? 3000
-    : 15000
+    ? 10000
+    : 30000
 }
 const reviewPolling = useAdaptivePolling(refresh, reviewPollDelay)
 
@@ -242,8 +292,9 @@ async function identify() {
   if (!selectedCount.value) return
   loading.value = true
   try {
-    activeBatch.value = await createReviewBatch([...selected.value])
-    selectedBatchId.value = activeBatch.value?.id ?? null
+    const createdBatch = await createReviewBatch([...selected.value])
+    selectedBatchId.value = createdBatch?.id ?? null
+    batchOffset.value = 0
     selected.value = new Set()
     notice.value = '识别任务已加入独立持久队列。'
     await refresh()
@@ -254,23 +305,55 @@ async function identify() {
   }
 }
 
-async function openBatch(id) {
+async function openBatch(id, offset = 0) {
   selectedBatchId.value = id
   const requestToken = viewRequests.begin()
   const requestedScope = scope.value
   const requestedQuery = requestedScope === 'archived' ? archiveQuery.value.trim() : ''
   try {
-    const nextBatch = await getReviewBatch(id, requestedScope, requestedQuery)
+    const nextBatch = await getReviewBatch(
+      id,
+      requestedScope,
+      requestedQuery,
+      offset,
+      batchPageSize,
+    )
     if (
       !viewRequests.isCurrent(requestToken)
       || scope.value !== requestedScope
       || (requestedScope === 'archived' && archiveQuery.value.trim() !== requestedQuery)
     ) return
     activeBatch.value = nextBatch
+    batchOffset.value = nextBatch?.pagination?.offset || 0
     prepareBatch(nextBatch)
     error.value = ''
   } catch (requestError) {
     if (viewRequests.isCurrent(requestToken)) error.value = requestError.message
+  }
+}
+
+async function changeBatchPage(offset) {
+  if (!selectedBatchId.value || loading.value) return
+  loading.value = true
+  try {
+    await openBatch(selectedBatchId.value, offset)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  } finally {
+    loading.value = false
+  }
+}
+
+async function changeBatchListPage(offset) {
+  if (loading.value) return
+  loading.value = true
+  try {
+    batchListOffset.value = Math.max(0, offset)
+    selectedBatchId.value = null
+    activeBatch.value = null
+    batchOffset.value = 0
+    await refresh()
+  } finally {
+    loading.value = false
   }
 }
 
@@ -279,6 +362,8 @@ function searchArchives() {
   archiveSearchTimer = window.setTimeout(() => {
     selectedBatchId.value = null
     activeBatch.value = null
+    batchListOffset.value = 0
+    batchOffset.value = 0
     refresh()
   }, 250)
 }
@@ -288,6 +373,8 @@ function clearArchiveSearch() {
   archiveQuery.value = ''
   selectedBatchId.value = null
   activeBatch.value = null
+  batchListOffset.value = 0
+  batchOffset.value = 0
   refresh()
 }
 
@@ -296,6 +383,8 @@ async function changeScope(nextScope) {
   scope.value = nextScope
   selectedBatchId.value = null
   activeBatch.value = null
+  batchListOffset.value = 0
+  batchOffset.value = 0
   await refresh()
 }
 
@@ -545,9 +634,7 @@ async function openLyricPanel(item, local, manualTrack = null) {
   lyricTab.value = saved?.status === 'selected'
     ? 'preview'
     : (saved?.status ? 'decision' : 'lyrics')
-  lyricAutoFollow.value = true
-  playbackTime.value = 0
-  lastActiveLyricIndex.value = -1
+  resetLyricPlayback({ autoFollow: true })
   await nextTick()
   if (opening) focusModal(lyricDrawer.value)
   lyricAudio.value?.play().catch(() => {})
@@ -568,11 +655,9 @@ function closeLyricPanel(force = false) {
   lyricSelection.value = null
   lyricDirty.value = false
   lyricTab.value = 'lyrics'
-  lyricAutoFollow.value = true
+  resetLyricPlayback({ autoFollow: true })
   lyricAction.value = ''
   lyricFeedback.value = { type: '', text: '' }
-  playbackTime.value = 0
-  lastActiveLyricIndex.value = -1
   const returnFocus = lyricReturnFocus
   lyricReturnFocus = null
   releaseLyricBodyLock?.()
@@ -616,12 +701,12 @@ async function searchLyrics(options = {}) {
     lyricFeedback.value = lyricCandidates.value.length
       ? { type: 'success', text: `已找到 ${lyricCandidates.value.length} 条候选。` }
       : { type: 'info', text: '搜索完成，没有找到匹配歌词。' }
-    const automaticCandidate = options?.autoPreview === true
-      ? highConfidenceLyricCandidate(lyricCandidates.value)
-      : null
-    if (automaticCandidate) {
+    const automaticCandidates = options?.autoPreview !== false
+      ? highConfidenceLyricCandidates(lyricCandidates.value)
+      : []
+    for (const automaticCandidate of automaticCandidates) {
       lyricAction.value = ''
-      await previewLyrics(automaticCandidate, { automatic: true })
+      if (await previewLyrics(automaticCandidate, { automatic: true })) break
     }
   } catch (requestError) {
     if (lyricRequests.isCurrent(requestToken)) {
@@ -654,10 +739,12 @@ async function previewLyrics(candidate, options = {}) {
         : `歌词已载入预览；${lyricQualitySummary(response.quality)}，点击“采用此歌词”后才会保存。`,
     }
     lyricTab.value = 'preview'
+    return true
   } catch (requestError) {
     if (lyricRequests.isCurrent(requestToken)) {
       lyricFeedback.value = { type: 'error', text: requestError.message }
     }
+    return false
   } finally {
     if (lyricRequests.isCurrent(requestToken)) lyricAction.value = ''
   }
@@ -707,32 +794,6 @@ async function persistLyrics(decision) {
   }
 }
 
-function processLyrics(action) {
-  if (!lyricContent.value.trim()) {
-    lyricFeedback.value = { type: 'info', text: '当前没有可处理的歌词。' }
-    return
-  }
-  try {
-    const processors = {
-      standard: () => standardizeLyrics(lyricContent.value, { preserveWordTiming: preserveWordTiming.value }),
-      blanks: () => compressBlankLines(lyricContent.value),
-      simplified: () => convertLyricsToSimplified(lyricContent.value),
-      offset: () => adjustLyricsOffset(lyricContent.value, lyricOffset.value),
-    }
-    lyricContent.value = processors[action]()
-    lyricDirty.value = true
-    const labels = {
-      standard: preserveWordTiming.value ? '已转换为标准 LRC，并保留逐字时间。' : '已转换为标准 LRC，并展开为普通行时间。',
-      blanks: '已压缩连续空白行。',
-      simplified: '已使用 OpenCC 转换为简体中文。',
-      offset: `已把全部行与逐字时间调整 ${Number(lyricOffset.value) >= 0 ? '+' : ''}${Math.round(Number(lyricOffset.value))} ms。`,
-    }
-    lyricFeedback.value = { type: 'info', text: `${labels[action]} 点击“采用此歌词”后才会保存。` }
-  } catch (processingError) {
-    lyricFeedback.value = { type: 'error', text: processingError.message }
-  }
-}
-
 async function translateCurrentLyrics() {
   if (!lyricPanel.value || lyricLoading.value || !lyricContent.value.trim()) return
   const panel = lyricPanel.value
@@ -760,60 +821,6 @@ async function translateCurrentLyrics() {
     }
   } finally {
     if (lyricRequests.isCurrent(requestToken)) lyricAction.value = ''
-  }
-}
-
-const parsedLyrics = computed(() => parseSyncedLyrics(lyricContent.value))
-const unsyncedLyricLines = computed(() => plainLyricLines(lyricContent.value))
-
-const activeLyricIndex = computed(() => {
-  let active = -1
-  parsedLyrics.value.forEach((line, index) => {
-    if (line.time <= playbackTime.value + 0.08) active = index
-  })
-  return active
-})
-
-async function syncLyrics(event) {
-  playbackTime.value = Number(event.currentTarget?.currentTime || 0)
-  if (activeLyricIndex.value === lastActiveLyricIndex.value) return
-  lastActiveLyricIndex.value = activeLyricIndex.value
-  if (lyricTab.value !== 'preview' || !lyricAutoFollow.value) return
-  await nextTick()
-  const active = lyricList.value?.querySelector('.active')
-  scrollLyricContainer(lyricList.value, active)
-}
-
-function seekToLyric(time) {
-  const audio = lyricAudio.value
-  if (!audio) return
-  audio.currentTime = time
-  audio.play().catch(() => {})
-}
-
-async function selectLyricTab(tab) {
-  lyricTab.value = tab
-  await nextTick()
-  lyricDrawer.value?.scrollTo({ top: 0, behavior: 'auto' })
-  if (tab !== 'preview' || !lyricAutoFollow.value) return
-  const active = lyricList.value?.querySelector('.active')
-  scrollLyricContainer(lyricList.value, active, 'auto')
-}
-
-async function resumeLyricFollow() {
-  lyricAutoFollow.value = true
-  await nextTick()
-  const active = lyricList.value?.querySelector('.active')
-  scrollLyricContainer(lyricList.value, active)
-}
-
-function pauseLyricFollow() {
-  lyricAutoFollow.value = false
-}
-
-function handleLyricScrollKey(event) {
-  if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
-    pauseLyricFollow()
   }
 }
 
@@ -943,13 +950,13 @@ function itemBusy(item) {
 
 async function recycleSource(item) {
   const confirmed = window.confirm(
-    `把预审专辑文件夹“${item.source_path}”整体移入回收目录？\n\n只移动当前 Inbox 中的这个目录，不会处理其他路径中的 qBittorrent 做种文件。`,
+    `把预审专辑文件夹“${item.source_path}”整体移入群晖回收站？\n\n只移动当前 Inbox 中的这个目录，不会处理其他路径中的 qBittorrent 做种文件。`,
   )
   if (!confirmed) return
   const requestToken = beginItemRequest(item)
   try {
     await recycleReviewSource(item.id, item.source_path)
-    notice.value = `已将专辑文件夹移入回收目录：${item.source_path}`
+    notice.value = `已将专辑文件夹移入群晖回收站：${item.source_path}`
     await Promise.all([refresh(), browse()])
   } catch (requestError) {
     error.value = requestError.message
@@ -1153,9 +1160,35 @@ onBeforeUnmount(() => {
             {{ archiveQuery ? '没有找到匹配的归档记录。' : '尚无已入库或已跳过的归档记录。' }}
           </p>
         </div>
+        <nav v-if="batchListPagination?.total > batchListPageSize" class="batch-list-pagination" aria-label="批次列表分页">
+          <button
+            type="button"
+            :disabled="!batchListPagination.has_previous || loading"
+            @click="changeBatchListPage(Math.max(0, batchListOffset - batchListPageSize))"
+          ><ChevronLeft :size="15" />较新批次</button>
+          <span>第 {{ batchListPage }} / {{ batchListPages }} 页</span>
+          <button
+            type="button"
+            :disabled="!batchListPagination.has_next || loading"
+            @click="changeBatchListPage(batchListOffset + batchListPageSize)"
+          >更早批次<ChevronRight :size="15" /></button>
+        </nav>
       </section>
 
       <section v-if="activeBatch" class="candidate-stack">
+        <nav v-if="activeBatch.pagination?.total > batchPageSize" class="batch-pagination" aria-label="批次项目分页">
+          <button
+            type="button"
+            :disabled="!activeBatch.pagination.has_previous || loading"
+            @click="changeBatchPage(Math.max(0, batchOffset - batchPageSize))"
+          ><ChevronLeft :size="15" />上一页</button>
+          <span>第 {{ batchPage }} / {{ batchPages }} 页 · 共 {{ activeBatch.pagination.total }} 张专辑</span>
+          <button
+            type="button"
+            :disabled="!activeBatch.pagination.has_next || loading"
+            @click="changeBatchPage(batchOffset + batchPageSize)"
+          >下一页<ChevronRight :size="15" /></button>
+        </nav>
         <article v-for="item in activeBatch.items" :key="item.id" class="review-panel album-review">
           <header class="album-header">
             <div>
@@ -1167,7 +1200,7 @@ onBeforeUnmount(() => {
                 v-if="scope === 'active' && canDecide(item)"
                 class="recycle-source-button"
                 :disabled="itemBusy(item)"
-                title="把整个源专辑文件夹移入回收目录"
+                title="把整个源专辑文件夹移入群晖回收站"
                 @click="recycleSource(item)"
               ><Trash2 :size="14" />移入回收站</button>
               <button
@@ -1436,13 +1469,13 @@ onBeforeUnmount(() => {
       </p>
 
       <nav class="lyrics-tabs" role="tablist" aria-label="歌词预审区">
-        <button id="review-lyrics-tab-preview" type="button" role="tab" aria-controls="review-lyrics-panel-preview" :aria-selected="lyricTab === 'preview'" :class="{ active: lyricTab === 'preview' }" @click="selectLyricTab('preview')">
+        <button id="review-lyrics-tab-preview" type="button" role="tab" aria-controls="review-lyrics-panel-preview" :aria-selected="lyricTab === 'preview'" :tabindex="lyricTab === 'preview' ? 0 : -1" :class="{ active: lyricTab === 'preview' }" @click="selectLyricTab('preview')" @keydown="handlePanelTabKey($event, ['preview', 'lyrics', 'decision'])">
           <Headphones :size="16" /><span>试听</span>
         </button>
-        <button id="review-lyrics-tab-editor" type="button" role="tab" aria-controls="review-lyrics-panel-editor" :aria-selected="lyricTab === 'lyrics'" :class="{ active: lyricTab === 'lyrics' }" @click="selectLyricTab('lyrics')">
+        <button id="review-lyrics-tab-editor" type="button" role="tab" aria-controls="review-lyrics-panel-editor" :aria-selected="lyricTab === 'lyrics'" :tabindex="lyricTab === 'lyrics' ? 0 : -1" :class="{ active: lyricTab === 'lyrics' }" @click="selectLyricTab('lyrics')" @keydown="handlePanelTabKey($event, ['preview', 'lyrics', 'decision'])">
           <Languages :size="16" /><span>歌词</span><i v-if="lyricDirty">未保存</i>
         </button>
-        <button id="review-lyrics-tab-decision" type="button" role="tab" aria-controls="review-lyrics-panel-decision" :aria-selected="lyricTab === 'decision'" :class="{ active: lyricTab === 'decision' }" @click="selectLyricTab('decision')">
+        <button id="review-lyrics-tab-decision" type="button" role="tab" aria-controls="review-lyrics-panel-decision" :aria-selected="lyricTab === 'decision'" :tabindex="lyricTab === 'decision' ? 0 : -1" :class="{ active: lyricTab === 'decision' }" @click="selectLyricTab('decision')" @keydown="handlePanelTabKey($event, ['preview', 'lyrics', 'decision'])">
           <Check :size="16" /><span>处理</span><i v-if="currentLyricDecision">已保存</i>
         </button>
       </nav>
@@ -1467,7 +1500,7 @@ onBeforeUnmount(() => {
       <section id="review-lyrics-panel-preview" v-show="lyricTab === 'preview'" class="lyrics-preview lyrics-tab-panel" role="tabpanel" aria-labelledby="review-lyrics-tab-preview">
         <div class="lyrics-preview-title">
           <strong>同步歌词预览</strong>
-          <button v-if="parsedLyrics.length" class="lyrics-follow" type="button" :class="{ active: lyricAutoFollow }" @click="lyricAutoFollow ? lyricAutoFollow = false : resumeLyricFollow()">
+          <button v-if="parsedLyrics.length" class="lyrics-follow" type="button" :class="{ active: lyricAutoFollow }" :aria-pressed="lyricAutoFollow" @click="lyricAutoFollow ? lyricAutoFollow = false : resumeLyricFollow()">
             {{ lyricAutoFollow ? '自动跟随中' : '恢复跟随' }}
           </button>
           <span v-else-if="lyricContent" class="lyrics-unsynced-badge">无时间轴</span>
@@ -1485,7 +1518,9 @@ onBeforeUnmount(() => {
           <button
             v-for="(line, index) in parsedLyrics"
             :key="line.time + ':' + index"
+            type="button"
             :class="{ active: index === activeLyricIndex }"
+            :aria-current="index === activeLyricIndex ? 'true' : undefined"
             @click="seekToLyric(line.time)"
           >
             <span v-for="text in line.texts" :key="text">{{ text }}</span>
@@ -1511,7 +1546,7 @@ onBeforeUnmount(() => {
             <label><input v-model="lyricSearch.sources.netease" type="checkbox">网易云音乐</label>
             <label><input v-model="lyricSearch.sources.qqmusic" type="checkbox">QQ 音乐</label>
             <label><input v-model="lyricSearch.sources.kugou" type="checkbox">酷狗音乐</label>
-            <span>排序：网易云 → QQ → 酷狗</span>
+            <span>综合排序：曲目匹配 + 来源可信度</span>
             <span v-if="lyricWarnings.length" class="lyrics-warning">{{ lyricWarnings.join('；') }}</span>
           </div>
         </section>
@@ -1531,7 +1566,7 @@ onBeforeUnmount(() => {
               <small>{{ candidate.artist || '未知艺术家' }} · {{ candidate.album || '未知专辑' }}</small>
               <small class="lyrics-match-details">{{ lyricCandidateMatchSummary(candidate) }}</small>
             </span>
-            <span class="lyrics-score">匹配 {{ Math.round(Number(candidate.score || 0) * 100) }}%</span>
+            <span class="lyrics-score">综合 {{ Math.round(Number(candidate.ranking_score ?? candidate.score ?? 0) * 100) }}%<small>匹配 {{ Math.round(Number(candidate.score || 0) * 100) }}%</small></span>
           </button>
         </section>
         <p v-else class="review-empty">搜索后在这里选择候选，载入后可以继续修改 LRC。</p>

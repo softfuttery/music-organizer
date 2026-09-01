@@ -1,10 +1,11 @@
 """YAML configuration loading, defaults and persistence."""
 
 import copy
+import hashlib
 import os
+import re
 import stat
 import threading
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -12,6 +13,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 import yaml
 
 from .auth import write_secret_atomic, write_secret_bytes_atomic
+from .locking import exclusive_file_lock
 from .naming import LEGACY_PATH_FORMAT, PICARD_PRESET3_PATH_FORMAT
 
 DEFAULT_INCLUDE_EXTS = [
@@ -20,36 +22,143 @@ DEFAULT_INCLUDE_EXTS = [
 ]
 DEFAULT_BEETS_PATH_FORMAT = PICARD_PRESET3_PATH_FORMAT
 DEFAULT_REVIEW_EXTRA_FILE_PATTERNS = ["*.jpg", "*.png"]
+REVIEW_DISCOVERY_MODES = {"direct", "artist_album"}
 _CONFIG_SAVE_LOCK = threading.RLock()
+_CONFIG_CACHE: dict[
+    Path,
+    tuple[
+        tuple[int, int, int, int, int],
+        tuple[tuple[str, str], ...],
+        tuple[tuple[str, tuple[int, int, int, int, int] | None], ...],
+        dict[str, Any],
+    ],
+] = {}
+_CONFIG_ENVIRONMENT_NAMES = (
+    "DATABASE_PATH",
+    "MAGICPUSH_TOKEN_FILE",
+    "QBITTORRENT_API_KEY_FILE",
+    "QBITTORRENT_PASSWORD_FILE",
+    "REVIEW_PROXY_PASSWORD_FILE",
+    "TRANSLATION_API_KEY_FILE",
+)
 
 
-@contextmanager
+def normalize_review_source_profiles(review: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return normalized, backward-compatible per-directory review workflows."""
+    raw_profiles = review.get("source_profiles")
+    if not isinstance(raw_profiles, list):
+        raw_profiles = []
+    legacy_auto = bool(review.get("auto_discover", True))
+    legacy_import_mode = str(review.get("import_mode") or "hardlink").lower()
+    if legacy_import_mode not in {"copy", "hardlink", "move"}:
+        legacy_import_mode = "hardlink"
+    if not raw_profiles:
+        raw_profiles = [
+            {
+                "path": value,
+                "name": Path(str(value)).name or str(value),
+                "discovery_mode": "direct",
+                "auto_discover": legacy_auto,
+                "import_mode": legacy_import_mode,
+                "move_extra_files": bool(review.get("move_extra_files", False)),
+                "cleanup_source_after_import": bool(
+                    review.get("cleanup_source_after_import", False)
+                ),
+            }
+            for value in review.get("source_roots", [])
+            if str(value).strip()
+        ]
+
+    normalized: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    seen_ids: set[str] = set()
+    for index, value in enumerate(raw_profiles):
+        if not isinstance(value, dict):
+            continue
+        path = str(value.get("path") or "").strip()
+        if not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        discovery_mode = str(value.get("discovery_mode") or "direct").lower()
+        if discovery_mode not in REVIEW_DISCOVERY_MODES:
+            discovery_mode = "direct"
+        import_mode = str(value.get("import_mode") or legacy_import_mode).lower()
+        if import_mode not in {"copy", "hardlink", "move"}:
+            import_mode = legacy_import_mode
+        profile_id = re.sub(
+            r"[^A-Za-z0-9_-]+", "-", str(value.get("id") or "").strip()
+        ).strip("-_")[:64]
+        if not profile_id or profile_id in seen_ids:
+            profile_id = hashlib.sha256(path.encode("utf-8")).hexdigest()[:12]
+        seen_ids.add(profile_id)
+        normalized.append(
+            {
+                "id": profile_id[:64],
+                "name": str(value.get("name") or Path(path).name or f"目录 {index + 1}")[
+                    :100
+                ],
+                "path": path,
+                "discovery_mode": discovery_mode,
+                "auto_discover": bool(value.get("auto_discover", legacy_auto)),
+                "import_mode": import_mode,
+                "move_extra_files": bool(
+                    value.get(
+                        "move_extra_files", review.get("move_extra_files", False)
+                    )
+                ),
+                "cleanup_source_after_import": bool(
+                    value.get(
+                        "cleanup_source_after_import",
+                        review.get("cleanup_source_after_import", False),
+                    )
+                ),
+            }
+        )
+    return normalized
+
+
 def _config_file_lock(config_path: Path):
     """Serialize config/secret snapshots across all service processes."""
-    lock_path = config_path.with_name(f".{config_path.name}.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as handle:
-        if handle.seek(0, os.SEEK_END) == 0:
-            handle.write(b"\0")
-            handle.flush()
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
+    return exclusive_file_lock(
+        config_path.with_name(f".{config_path.name}.lock"),
+        timeout=30,
+    )
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+def _file_revision(path: Path) -> tuple[int, int, int, int, int] | None:
+    try:
+        metadata = path.stat()
+    except FileNotFoundError:
+        return None
+    return (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(metadata.st_size),
+        int(metadata.st_mtime_ns),
+        int(metadata.st_ctime_ns),
+    )
+
+
+def _environment_revision() -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (name, str(os.environ.get(name) or ""))
+        for name in _CONFIG_ENVIRONMENT_NAMES
+    )
+
+
+def _secret_revisions(
+    config: dict[str, Any],
+) -> tuple[tuple[str, tuple[int, int, int, int, int] | None], ...]:
+    paths = {
+        str(Path(str(section.get(file_key))).expanduser().absolute())
+        for section, _value_key, file_key in _secret_specs(config)
+        if str(section.get(file_key) or "").strip()
+    }
+    return tuple((value, _file_revision(Path(value))) for value in sorted(paths))
+
+
+def _invalidate_config_cache(path: Path) -> None:
+    _CONFIG_CACHE.pop(path.absolute(), None)
 
 
 def _runtime_secret_path(environment_name: str, filename: str) -> str:
@@ -286,6 +395,9 @@ def apply_defaults(config: dict[str, Any]) -> dict[str, Any]:
         _runtime_secret_path("QBITTORRENT_API_KEY_FILE", "qbittorrent_api_key"),
     )
     qb.setdefault("timeout", 10)
+    qb.setdefault("network_max_attempts", 3)
+    qb.setdefault("network_retry_seconds", 1)
+    qb.setdefault("network_retry_max_seconds", 5)
     qb.setdefault("min_completion_age_seconds", 60)
     qb.setdefault("scan_mode", "torrent_paths")
     qb.setdefault("poll_mode", "sync")
@@ -303,7 +415,8 @@ def apply_defaults(config: dict[str, Any]) -> dict[str, Any]:
     review.setdefault("max_attempts", 3)
     review.setdefault("import_timeout_seconds", 3600)
     review.setdefault("auto_discover", True)
-    review.setdefault("discovery_interval_seconds", 15)
+    review.setdefault("discovery_interval_seconds", 60)
+    review.setdefault("discovery_full_rescan_seconds", 600)
     review.setdefault("discovery_stable_seconds", 60)
     review.setdefault("proxy_url", "")
     review.setdefault("proxy_username", "")
@@ -352,6 +465,13 @@ def apply_defaults(config: dict[str, Any]) -> dict[str, Any]:
     ]
     review.setdefault("move_extra_files", False)
     review.setdefault("cleanup_source_after_import", False)
+    review["source_profiles"] = normalize_review_source_profiles(review)
+    review["source_roots"] = [
+        profile["path"] for profile in review["source_profiles"]
+    ]
+    review["auto_discover"] = any(
+        profile["auto_discover"] for profile in review["source_profiles"]
+    )
     config.setdefault("translation", {})
     translation = config["translation"]
     translation.setdefault("enabled", False)
@@ -388,8 +508,21 @@ def apply_defaults(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_config(path: Path) -> dict[str, Any]:
-    if not path.exists():
+    key = path.absolute()
+    revision = _file_revision(path)
+    if revision is None:
         raise FileNotFoundError(f"Config file not found: {path}")
+    environment_revision = _environment_revision()
+    with _CONFIG_SAVE_LOCK:
+        cached = _CONFIG_CACHE.get(key)
+        if (
+            cached is not None
+            and cached[0] == revision
+            and cached[1] == environment_revision
+            and cached[2] == _secret_revisions(cached[3])
+        ):
+            return copy.deepcopy(cached[3])
+
     with _CONFIG_SAVE_LOCK, _config_file_lock(path):
         with path.open("r", encoding="utf-8") as fh:
             config = yaml.safe_load(fh) or {}
@@ -397,7 +530,16 @@ def load_config(path: Path) -> dict[str, Any]:
             raise ValueError("Config root must be a mapping")
         config = apply_defaults(config)
         _hydrate_credentials(config)
-        return config
+        revision = _file_revision(path)
+        if revision is None:
+            raise FileNotFoundError(f"Config file not found: {path}")
+        _CONFIG_CACHE[key] = (
+            revision,
+            environment_revision,
+            _secret_revisions(config),
+            copy.deepcopy(config),
+        )
+        return copy.deepcopy(config)
 
 
 def _save_config_locked(path: Path, config: dict[str, Any]) -> None:
@@ -434,6 +576,7 @@ def _save_config_locked(path: Path, config: dict[str, Any]) -> None:
 def save_config(path: Path, config: dict[str, Any]) -> None:
     with _CONFIG_SAVE_LOCK, _config_file_lock(path):
         _save_config_locked(path, config)
+        _invalidate_config_cache(path)
 
 
 def migrate_plaintext_credentials(path: Path) -> bool:
@@ -450,6 +593,7 @@ def migrate_plaintext_credentials(path: Path) -> bool:
         config = apply_defaults(raw)
         _hydrate_credentials(config)
         _save_config_locked(path, config)
+        _invalidate_config_cache(path)
         return True
 
 

@@ -5,6 +5,8 @@ x-app-common: &app-common
   pull_policy: always
   restart: unless-stopped
   user: "${APP_UID:-1026}:${APP_GID:-100}"
+  group_add:
+    - "${WEB_EXTRA_GID:-100}"
   security_opt:
     - no-new-privileges:true
   cap_drop:
@@ -42,6 +44,7 @@ services:
       SECRET_KEY_PATH: /run/secrets/flask_secret_key
       MAGICPUSH_TOKEN_FILE: /run/secrets/magicpush/token
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-}
     volumes:
       - ${MEDIA_ROOT:-./media}:/media
       - ${CONFIG_DIR:-./config}:/app/config
@@ -62,7 +65,7 @@ services:
     command: ["python", "worker.py"]
     environment:
       <<: *app-environment
-      WORKER_POLL_SECONDS: 1
+      WORKER_POLL_SECONDS: ${WORKER_POLL_SECONDS:-1}
       MAGICPUSH_TOKEN_FILE: /run/secrets/magicpush/token
     volumes:
       - ${MEDIA_ROOT:-./media}:/media
@@ -80,6 +83,10 @@ services:
     <<: *app-common
     stop_grace_period: 60s
     command: ["python", "review_worker.py"]
+    environment:
+      <<: *app-environment
+      REVIEW_WORKER_HEARTBEAT_MAX_AGE_SECONDS: ${REVIEW_WORKER_HEARTBEAT_MAX_AGE_SECONDS:-30}
+      REVIEW_IMPORT_TIMEOUT_SECONDS: ${REVIEW_IMPORT_TIMEOUT_SECONDS:-}
     healthcheck:
       test: ["CMD", "python", "review_worker.py", "--health"]
       interval: 30s

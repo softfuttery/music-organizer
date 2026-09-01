@@ -61,9 +61,34 @@ test('history and config are first-class themed Vue workspaces', () => {
   assert.match(adminCss, /:root\[data-theme="dark"\]/)
 })
 
+test('review batches load bounded pages and avoid aggressive full-batch polling', () => {
+  assert.match(apiSource, /offset: String\(offset\), limit: String\(limit\)/)
+  assert.match(reviewWorkspace, /const batchPageSize = 20/)
+  assert.match(reviewWorkspace, /class="batch-pagination"/)
+  assert.match(reviewWorkspace, /const batchListPageSize = 30/)
+  assert.match(reviewWorkspace, /class="batch-list-pagination"/)
+  assert.match(reviewWorkspace, />更早批次<ChevronRight/)
+  assert.match(reviewWorkspace, /\? 10000\s*:\s*30000/)
+  assert.match(reviewCss, /\.batch-pagination\s*{/)
+  assert.match(reviewCss, /\.batch-list-pagination\s*{/)
+})
+
 test('library lyric candidate titles keep an explicit readable foreground', () => {
   assert.match(libraryCss, /\.library-candidates button\s*{[^}]*color:\s*#272923;/s)
   assert.match(libraryCss, /\.library-candidates strong\s*{[^}]*color:\s*#272923;/s)
+})
+
+test('shared lyric workspaces expose keyboard tabs and semantic playback state', () => {
+  for (const workspace of [libraryWorkspace, reviewWorkspace]) {
+    assert.match(workspace, /role="tablist"/)
+    assert.match(workspace, /:tabindex="[^"]+ \? 0 : -1"/)
+    assert.match(workspace, /@keydown="handlePanelTabKey/)
+    assert.match(workspace, /:aria-pressed="lyricAutoFollow"/)
+    assert.match(workspace, /:aria-current="index === activeLyricIndex/)
+  }
+  assert.match(designCss, /--workspace-panel:\s*var\(--surface\)/)
+  assert.match(reviewCss, /background:\s*var\(--workspace-overlay\)/)
+  assert.match(libraryCss, /background:\s*var\(--workspace-overlay\)/)
 })
 
 test('dark theme targets the active library and lyric workspace classes', () => {

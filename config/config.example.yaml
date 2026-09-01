@@ -64,6 +64,9 @@ qbittorrent:
   password_file: '/app/data/secrets/qbittorrent_password'
   api_key_file: '/app/data/secrets/qbittorrent_api_key'
   timeout: 10
+  network_max_attempts: 3
+  network_retry_seconds: 1
+  network_retry_max_seconds: 5
   min_completion_age_seconds: 60
   scan_mode: torrent_paths
   poll_mode: sync
@@ -83,13 +86,28 @@ logging:
 
 review:
   enabled: false
-  source_roots:
-    - '/media/incoming/music'
+  source_profiles:
+    - id: qb-downloads
+      name: 'qB 新下载'
+      path: '/media/incoming/music'
+      discovery_mode: direct
+      auto_discover: true
+      import_mode: hardlink
+      move_extra_files: false
+      cleanup_source_after_import: false
+    - id: existing-library
+      name: '旧音乐库'
+      path: '/media/music/unsorted'
+      discovery_mode: artist_album
+      auto_discover: false
+      import_mode: copy
+      move_extra_files: false
+      cleanup_source_after_import: false
   identify_workers: 3
   poll_seconds: 1
   import_timeout_seconds: 3600
-  auto_discover: true
-  discovery_interval_seconds: 15
+  discovery_interval_seconds: 60
+  discovery_full_rescan_seconds: 600
   discovery_stable_seconds: 60
   proxy_url: ''
   proxy_username: ''

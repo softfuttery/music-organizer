@@ -16,6 +16,7 @@ from .lyrics import (
     lyric_is_synced,
     write_embedded_lyrics,
 )
+from .pathsafe import resolve_confined, resolve_root, safe_relative_parts
 from .review import AUDIO_EXTENSIONS
 
 TRASH_DIRECTORY = ".music-organizer-trash"
@@ -30,38 +31,44 @@ EDITABLE_TAGS = (
     "date",
     "genre",
 )
+_TAG_ALIASES = {
+    "title": ("title", "TIT2", "\xa9nam"),
+    "artist": ("artist", "TPE1", "\xa9ART"),
+    "album": ("album", "TALB", "\xa9alb"),
+    "albumartist": ("albumartist", "album artist", "TPE2", "aART"),
+    "tracknumber": ("tracknumber", "track", "TRCK", "trkn"),
+    "discnumber": ("discnumber", "disc", "TPOS", "disk"),
+    "date": ("date", "year", "TDRC", "TYER", "\xa9day"),
+    "genre": ("genre", "TCON", "\xa9gen", "gnre"),
+}
+_MEDIA_UNSET = object()
 
 
 def _one(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         value = value[0] if value else ""
+    if isinstance(value, tuple):
+        current = int(value[0] or 0) if value else 0
+        total = int(value[1] or 0) if len(value) > 1 else 0
+        value = f"{current}/{total}" if total else str(current)
+    text = getattr(value, "text", value)
+    if isinstance(text, (list, tuple)):
+        text = text[0] if text else ""
+    value = text
     return str(value or "").strip()
 
 
 def library_root(value: str | Path) -> Path:
-    configured = Path(value).expanduser()
-    if configured.is_symlink():
-        raise ValueError("音乐库目录不能是符号链接")
-    try:
-        root = configured.resolve(strict=True)
-    except (FileNotFoundError, OSError, RuntimeError) as exc:
-        raise ValueError("音乐库目录不存在") from exc
-    if not root.is_dir():
-        raise ValueError("音乐库目录不存在")
-    if root != configured.absolute():
-        raise ValueError("音乐库目录被重定向")
-    return root
+    return resolve_root(value, label="音乐库目录")
 
 
 def relative_library_path(value: Any) -> PurePosixPath:
     raw = str(value or "").strip()
-    path = PurePosixPath(raw)
-    if (
-        not raw
-        or path.is_absolute()
-        or ".." in path.parts
-        or TRASH_DIRECTORY in path.parts
-    ):
+    try:
+        path = PurePosixPath(*safe_relative_parts(raw))
+    except ValueError as exc:
+        raise ValueError("音乐库相对路径无效") from exc
+    if TRASH_DIRECTORY in path.parts:
         raise ValueError("音乐库相对路径无效")
     return path
 
@@ -73,14 +80,12 @@ def library_file(
     audio_only: bool = True,
 ) -> Path:
     relative = relative_library_path(value)
-    current = root
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            raise ValueError("音乐库路径不能包含符号链接")
-    resolved = current.resolve(strict=True)
-    if not resolved.is_relative_to(root) or not resolved.is_file():
-        raise ValueError("文件不在音乐库内")
+    resolved = resolve_confined(
+        root,
+        Path(*relative.parts),
+        kind="file",
+        label="音乐库文件",
+    )
     if audio_only and resolved.suffix.lower() not in AUDIO_EXTENSIONS:
         raise ValueError("目标不是支持的音频文件")
     return resolved
@@ -90,15 +95,13 @@ def library_directory(root: Path, value: Any) -> Path:
     relative = relative_library_path(value)
     if not relative.parts:
         raise ValueError("不能操作音乐库根目录")
-    current = root
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            raise ValueError("音乐库路径不能包含符号链接")
-    resolved = current.resolve(strict=True)
-    if resolved == root or not resolved.is_relative_to(root) or not resolved.is_dir():
-        raise ValueError("文件夹不在音乐库内")
-    return resolved
+    return resolve_confined(
+        root,
+        Path(*relative.parts),
+        kind="directory",
+        allow_root=False,
+        label="音乐库文件夹",
+    )
 
 
 def _media(path: Path, *, easy: bool = False) -> Any:
@@ -113,18 +116,37 @@ def _media(path: Path, *, easy: bool = False) -> Any:
     return media
 
 
-def read_tags(path: Path) -> dict[str, str]:
-    try:
-        media = _media(path, easy=True)
-    except ValueError:
+def _tags_from_media(media: Any | None) -> dict[str, str]:
+    if media is None:
         return {name: "" for name in EDITABLE_TAGS}
     tags = getattr(media, "tags", None) or {}
-    return {name: _one(tags.get(name)) for name in EDITABLE_TAGS}
+    values: dict[str, str] = {}
+    for name in EDITABLE_TAGS:
+        value = ""
+        for key in _TAG_ALIASES[name]:
+            try:
+                value = _one(tags.get(key))
+            except (AttributeError, KeyError, TypeError, ValueError):
+                value = ""
+            if value:
+                break
+        values[name] = value
+    return values
 
 
-def audio_duration(path: Path) -> float:
+def read_tags(path: Path, *, media: Any = _MEDIA_UNSET) -> dict[str, str]:
+    if media is _MEDIA_UNSET:
+        try:
+            media = _media(path)
+        except ValueError:
+            media = None
+    return _tags_from_media(media)
+
+
+def audio_duration(path: Path, *, media: Any = _MEDIA_UNSET) -> float:
     try:
-        media = _media(path)
+        if media is _MEDIA_UNSET:
+            media = _media(path)
         return round(float(getattr(getattr(media, "info", None), "length", 0) or 0), 3)
     except (TypeError, ValueError):
         return 0.0
@@ -134,10 +156,12 @@ def sidecar_path(path: Path) -> Path:
     return path.with_suffix(".lrc")
 
 
-def lyric_state(path: Path) -> dict[str, Any]:
+def lyric_state(path: Path, *, media: Any = _MEDIA_UNSET) -> dict[str, Any]:
     embedded = ""
     try:
-        embedded = _read_embedded_lyrics(_media(path))
+        if media is _MEDIA_UNSET:
+            media = _media(path)
+        embedded = _read_embedded_lyrics(media) if media is not None else ""
     except ValueError:
         pass
     sidecar = ""
@@ -162,11 +186,32 @@ def lyric_state(path: Path) -> dict[str, Any]:
     }
 
 
-def track_payload(path: Path, root: Path) -> dict[str, Any]:
+def track_payload(
+    path: Path,
+    root: Path,
+    *,
+    media: Any = _MEDIA_UNSET,
+) -> dict[str, Any]:
     relative = path.relative_to(root).as_posix()
     stat = path.stat()
-    tags = read_tags(path)
-    lyrics = lyric_state(path)
+    if media is _MEDIA_UNSET:
+        try:
+            media = _media(path)
+        except ValueError:
+            media = None
+    tags = read_tags(path, media=media)
+    embedded = bool(
+        _read_embedded_lyrics(media) if media is not None else ""
+    )
+    lyric_file = sidecar_path(path)
+    try:
+        sidecar = (
+            not lyric_file.is_symlink()
+            and lyric_file.is_file()
+            and lyric_file.stat().st_size > 0
+        )
+    except OSError:
+        sidecar = False
     return {
         "path": relative,
         "name": path.name,
@@ -176,11 +221,11 @@ def track_payload(path: Path, root: Path) -> dict[str, Any]:
         "modified_at": datetime.fromtimestamp(
             stat.st_mtime, timezone.utc
         ).isoformat(),
-        "duration": audio_duration(path),
+        "duration": audio_duration(path, media=media),
         "tags": tags,
         "lyrics": {
-            "embedded": bool(lyrics["embedded"]["exists"]),
-            "sidecar": bool(lyrics["sidecar"]["exists"]),
+            "embedded": embedded,
+            "sidecar": sidecar,
         },
     }
 
@@ -370,8 +415,12 @@ def scan_folders(
 
 
 def track_detail(path: Path, root: Path) -> dict[str, Any]:
-    payload = track_payload(path, root)
-    payload["lyrics"] = lyric_state(path)
+    try:
+        media = _media(path)
+    except ValueError:
+        media = None
+    payload = track_payload(path, root, media=media)
+    payload["lyrics"] = lyric_state(path, media=media)
     return payload
 
 

@@ -37,23 +37,14 @@ import {
 import { applyAudioPreferences, saveAudioPreferences } from './audio-preferences'
 import {
   hasTextDecodeDamage,
-  highConfidenceLyricCandidate,
+  highConfidenceLyricCandidates,
   lyricCandidateTitle,
   lyricCandidateMatchSummary,
   lyricQualitySummary,
   lyricBuffersFromState,
-  parseSyncedLyrics,
-  plainLyricLines,
   readPreferredLyricMode,
   rememberPreferredLyricMode,
-  scrollLyricContainer,
 } from './lyric-editor-state'
-import {
-  adjustLyricsOffset,
-  compressBlankLines,
-  convertLyricsToSimplified,
-  standardizeLyrics,
-} from './lyric-processing'
 import {
   focusModal,
   lockBodyScroll,
@@ -61,6 +52,7 @@ import {
   trapModalTab,
 } from './modal-focus'
 import { createLatestRequestGate } from './requestState'
+import { useLyricEditor } from './useLyricEditor'
 
 const listing = ref({ folders: [], total: 0, track_total: 0, offset: 0, limit: 20, root: '', order: 'desc' })
 const openFolders = ref(new Set())
@@ -83,12 +75,7 @@ const lyricFeedback = ref({ type: '', text: '' })
 const tagSaving = ref(false)
 const tagFeedback = ref({ type: '', text: '' })
 const activeEditorPanel = ref('lyrics')
-const playbackTime = ref(0)
 const lyricList = ref(null)
-const lastActiveLyricIndex = ref(-1)
-const lyricAutoFollow = ref(true)
-const preserveWordTiming = ref(true)
-const lyricOffset = ref(0)
 const audioPlayer = ref(null)
 const libraryHeading = ref(null)
 const libraryDrawer = ref(null)
@@ -108,6 +95,30 @@ const lyricsContent = computed({
   set: (value) => {
     lyricsByMode.value = { ...lyricsByMode.value, [lyricsMode.value]: value }
   },
+})
+const {
+  activeLyricIndex,
+  handleLyricScrollKey,
+  handlePanelTabKey,
+  lyricAutoFollow,
+  lyricOffset,
+  parsedLyrics,
+  pauseLyricFollow,
+  preserveWordTiming,
+  processLyrics,
+  resetLyricPlayback,
+  resumeLyricFollow,
+  seekLyrics,
+  selectPanel: selectEditorPanel,
+  syncLyrics,
+  unsyncedLyricLines,
+} = useLyricEditor({
+  content: lyricsContent,
+  activePanel: activeEditorPanel,
+  list: lyricList,
+  audio: audioPlayer,
+  drawer: libraryDrawer,
+  feedback: lyricFeedback,
 })
 const lyricBusy = computed(() => Boolean(lyricOperation.value))
 const lyricsDirty = computed(() => (
@@ -211,9 +222,7 @@ async function openTrack(track) {
     lyricOperation.value = ''
     lyricCandidateKey.value = ''
     activeEditorPanel.value = 'lyrics'
-    playbackTime.value = 0
-    lastActiveLyricIndex.value = -1
-    lyricAutoFollow.value = true
+    resetLyricPlayback({ autoFollow: true })
     await nextTick()
     if (!trackRequests.isCurrent(requestToken)) return
     if (opening) focusModal(libraryDrawer.value)
@@ -247,8 +256,7 @@ function closeTrack(force = false) {
   lyricCandidateKey.value = ''
   lyricFeedback.value = { type: '', text: '' }
   tagFeedback.value = { type: '', text: '' }
-  playbackTime.value = 0
-  lastActiveLyricIndex.value = -1
+  resetLyricPlayback()
   const returnFocus = trackReturnFocus
   trackReturnFocus = null
   releaseTrackBodyLock?.()
@@ -317,12 +325,12 @@ async function searchLyrics(options = {}) {
     lyricFeedback.value = lyricCandidates.value.length
       ? { type: 'success', text: `已找到 ${lyricCandidates.value.length} 条候选，请选择一条预览。` }
       : { type: 'info', text: '搜索完成，没有找到匹配歌词。可修改上方标题或艺术家后重试，也可直接粘贴 LRC。' }
-    const automaticCandidate = options?.autoPreview === true
-      ? highConfidenceLyricCandidate(lyricCandidates.value)
-      : null
-    if (automaticCandidate) {
+    const automaticCandidates = options?.autoPreview !== false
+      ? highConfidenceLyricCandidates(lyricCandidates.value)
+      : []
+    for (const automaticCandidate of automaticCandidates) {
       lyricOperation.value = ''
-      await chooseLyrics(automaticCandidate, { automatic: true })
+      if (await chooseLyrics(automaticCandidate, { automatic: true })) break
     }
   } catch (requestError) {
     if (lyricRequests.isCurrent(requestToken)) {
@@ -354,13 +362,13 @@ async function chooseLyrics(candidate, options = {}) {
         : `歌词已载入预览；${lyricQualitySummary(result.quality)}，尚未保存。`,
     }
     activeEditorPanel.value = 'preview'
-    lyricAutoFollow.value = true
-    playbackTime.value = 0
-    lastActiveLyricIndex.value = -1
+    resetLyricPlayback({ autoFollow: true })
+    return true
   } catch (requestError) {
     if (lyricRequests.isCurrent(requestToken)) {
       lyricFeedback.value = { type: 'error', text: requestError.message }
     }
+    return false
   } finally {
     if (lyricRequests.isCurrent(requestToken)) {
       lyricOperation.value = ''
@@ -422,31 +430,6 @@ async function embedInstrumentalLyrics() {
   lyricsContent.value = INSTRUMENTAL_LYRIC
   lyricFeedback.value = { type: 'info', text: '正在写入纯音乐提示…' }
   await persistLyrics()
-}
-
-function processLyrics(action) {
-  if (!lyricsContent.value.trim()) {
-    lyricFeedback.value = { type: 'info', text: '当前没有可处理的歌词。' }
-    return
-  }
-  try {
-    const processors = {
-      standard: () => standardizeLyrics(lyricsContent.value, { preserveWordTiming: preserveWordTiming.value }),
-      blanks: () => compressBlankLines(lyricsContent.value),
-      simplified: () => convertLyricsToSimplified(lyricsContent.value),
-      offset: () => adjustLyricsOffset(lyricsContent.value, lyricOffset.value),
-    }
-    lyricsContent.value = processors[action]()
-    const labels = {
-      standard: preserveWordTiming.value ? '已转换为标准 LRC，并保留逐字时间。' : '已转换为标准 LRC，并展开为普通行时间。',
-      blanks: '已压缩连续空白行。',
-      simplified: '已使用 OpenCC 转换为简体中文。',
-      offset: `已把全部行与逐字时间调整 ${Number(lyricOffset.value) >= 0 ? '+' : ''}${Math.round(Number(lyricOffset.value))} ms。`,
-    }
-    lyricFeedback.value = { type: 'info', text: `${labels[action]} 尚未保存。` }
-  } catch (processingError) {
-    lyricFeedback.value = { type: 'error', text: processingError.message }
-  }
 }
 
 async function translateCurrentLyrics() {
@@ -567,63 +550,9 @@ async function restore(entry) {
   }
 }
 
-const parsedLyrics = computed(() => parseSyncedLyrics(lyricsContent.value))
-const unsyncedLyricLines = computed(() => plainLyricLines(lyricsContent.value))
-
-const activeLyricIndex = computed(() => {
-  let active = -1
-  parsedLyrics.value.forEach((line, index) => {
-    if (line.time <= playbackTime.value + 0.08) active = index
-  })
-  return active
-})
-
-async function syncLyrics(event) {
-  playbackTime.value = Number(event.currentTarget?.currentTime || 0)
-  if (activeLyricIndex.value === lastActiveLyricIndex.value) return
-  lastActiveLyricIndex.value = activeLyricIndex.value
-  if (activeEditorPanel.value !== 'preview' || !lyricAutoFollow.value) return
-  await nextTick()
-  const active = lyricList.value?.querySelector('.active')
-  scrollLyricContainer(lyricList.value, active)
-}
-
-function seekLyrics(time) {
-  const audio = audioPlayer.value
-  if (!audio) return
-  audio.currentTime = time
-  audio.play().catch(() => {})
-}
-
-async function selectEditorPanel(panel) {
-  activeEditorPanel.value = panel
-  await nextTick()
-  libraryDrawer.value?.scrollTo({ top: 0, behavior: 'auto' })
-  if (panel !== 'preview' || !lyricAutoFollow.value) return
-  const active = lyricList.value?.querySelector('.active')
-  scrollLyricContainer(lyricList.value, active, 'auto')
-}
-
 function selectLyricsMode(mode) {
   lyricsMode.value = mode
   lyricFeedback.value = { type: '', text: '' }
-}
-
-async function resumeLyricFollow() {
-  lyricAutoFollow.value = true
-  await nextTick()
-  const active = lyricList.value?.querySelector('.active')
-  scrollLyricContainer(lyricList.value, active)
-}
-
-function pauseLyricFollow() {
-  lyricAutoFollow.value = false
-}
-
-function handleLyricScrollKey(event) {
-  if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
-    pauseLyricFollow()
-  }
 }
 
 function handleWorkspaceKey(event) {
@@ -735,13 +664,13 @@ onBeforeUnmount(() => {
         </p>
 
         <nav class="library-editor-tabs" role="tablist" aria-label="音乐编辑区">
-          <button id="library-tab-preview" type="button" role="tab" aria-controls="library-panel-preview" :aria-selected="activeEditorPanel === 'preview'" :class="{ active: activeEditorPanel === 'preview' }" @click="selectEditorPanel('preview')">
+          <button id="library-tab-preview" type="button" role="tab" aria-controls="library-panel-preview" :aria-selected="activeEditorPanel === 'preview'" :tabindex="activeEditorPanel === 'preview' ? 0 : -1" :class="{ active: activeEditorPanel === 'preview' }" @click="selectEditorPanel('preview')" @keydown="handlePanelTabKey($event, ['preview', 'lyrics', 'tags'])">
             <Headphones :size="16" /><span>试听</span>
           </button>
-          <button id="library-tab-lyrics" type="button" role="tab" aria-controls="library-panel-lyrics" :aria-selected="activeEditorPanel === 'lyrics'" :class="{ active: activeEditorPanel === 'lyrics' }" @click="selectEditorPanel('lyrics')">
+          <button id="library-tab-lyrics" type="button" role="tab" aria-controls="library-panel-lyrics" :aria-selected="activeEditorPanel === 'lyrics'" :tabindex="activeEditorPanel === 'lyrics' ? 0 : -1" :class="{ active: activeEditorPanel === 'lyrics' }" @click="selectEditorPanel('lyrics')" @keydown="handlePanelTabKey($event, ['preview', 'lyrics', 'tags'])">
             <Languages :size="16" /><span>歌词</span><i v-if="anyLyricsDirty">未保存</i>
           </button>
-          <button id="library-tab-tags" type="button" role="tab" aria-controls="library-panel-tags" :aria-selected="activeEditorPanel === 'tags'" :class="{ active: activeEditorPanel === 'tags' }" @click="selectEditorPanel('tags')">
+          <button id="library-tab-tags" type="button" role="tab" aria-controls="library-panel-tags" :aria-selected="activeEditorPanel === 'tags'" :tabindex="activeEditorPanel === 'tags' ? 0 : -1" :class="{ active: activeEditorPanel === 'tags' }" @click="selectEditorPanel('tags')" @keydown="handlePanelTabKey($event, ['preview', 'lyrics', 'tags'])">
             <Music2 :size="16" /><span>标签</span><i v-if="tagsDirty">未保存</i>
           </button>
         </nav>
@@ -764,7 +693,7 @@ onBeforeUnmount(() => {
         <section id="library-panel-preview" v-show="activeEditorPanel === 'preview'" class="library-editor-section library-preview-section" role="tabpanel" aria-labelledby="library-tab-preview">
           <div class="section-title">
             <Headphones :size="16" /><strong>同步试听</strong>
-            <button v-if="parsedLyrics.length" class="lyrics-follow" type="button" :class="{ active: lyricAutoFollow }" @click="lyricAutoFollow ? lyricAutoFollow = false : resumeLyricFollow()">
+            <button v-if="parsedLyrics.length" class="lyrics-follow" type="button" :class="{ active: lyricAutoFollow }" :aria-pressed="lyricAutoFollow" @click="lyricAutoFollow ? lyricAutoFollow = false : resumeLyricFollow()">
               {{ lyricAutoFollow ? '自动跟随中' : '恢复跟随' }}
             </button>
             <span v-else-if="lyricsContent" class="lyrics-unsynced-badge">无时间轴</span>
@@ -779,7 +708,7 @@ onBeforeUnmount(() => {
             @touchstart.passive="pauseLyricFollow"
             @keydown="handleLyricScrollKey"
           >
-            <button v-for="(line, index) in parsedLyrics" :key="`${line.time}:${index}`" :class="{ active: index === activeLyricIndex }" @click="seekLyrics(line.time)">
+            <button v-for="(line, index) in parsedLyrics" :key="`${line.time}:${index}`" type="button" :class="{ active: index === activeLyricIndex }" :aria-current="index === activeLyricIndex ? 'true' : undefined" @click="seekLyrics(line.time)">
               <span v-for="text in line.texts" :key="text">{{ text }}</span>
             </button>
           </div>
@@ -803,7 +732,7 @@ onBeforeUnmount(() => {
             <label><input v-model="lyricSources.netease" type="checkbox">网易云音乐</label>
             <label><input v-model="lyricSources.qqmusic" type="checkbox">QQ 音乐</label>
             <label><input v-model="lyricSources.kugou" type="checkbox">酷狗音乐</label>
-            <span class="lyrics-source-priority">排序：网易云 → QQ → 酷狗</span>
+            <span class="lyrics-source-priority">综合排序：曲目匹配 + 来源可信度</span>
           </div>
           <p v-for="warning in lyricWarnings" :key="warning" class="library-warning">{{ warning }}</p>
           <div v-if="lyricCandidates.length" class="library-candidates">
@@ -811,7 +740,7 @@ onBeforeUnmount(() => {
               <strong>{{ lyricCandidateTitle(candidate, lyricQuery.title) }}</strong>
               <span>{{ candidate.artist || '未知艺术家' }} · {{ candidate.album || '未知专辑' }} · {{ candidate.source }}</span>
               <small>{{ lyricCandidateMatchSummary(candidate) }}</small>
-              <i>曲目匹配 {{ Math.round(Number(candidate.score || 0) * 100) }}%</i>
+              <i>综合 {{ Math.round(Number(candidate.ranking_score ?? candidate.score ?? 0) * 100) }}% · 匹配 {{ Math.round(Number(candidate.score || 0) * 100) }}%</i>
               <LoaderCircle v-if="lyricOperation === 'fetch' && lyricCandidateKey === `${candidate.source}:${candidate.provider_id}`" class="spinning candidate-loader" :size="15" />
             </button>
           </div>

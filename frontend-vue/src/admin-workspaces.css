@@ -90,6 +90,10 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .config-feedback.error { color: var(--danger); background: rgb(209 59 59 / 9%); }
 .config-loading { min-height: 180px; display: flex; align-items: center; justify-content: center; gap: 9px; color: var(--muted); }
 .config-workspace form { display: grid; gap: 14px; }
+.config-categories { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; border: 1px solid var(--line); border-radius: 13px; padding: 7px; background: var(--surface); }
+.config-categories button { min-width: 0; min-height: 44px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; cursor: pointer; font-size: 10px; font-weight: 700; }
+.config-categories button:hover { color: var(--ink); background: var(--surface-muted); }
+.config-categories button.active { color: var(--ink); background: var(--surface-muted); box-shadow: inset 0 0 0 1px var(--line); }
 .config-section { padding: 20px; }
 .config-section > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .config-section > header small { color: var(--muted); font-size: 8px; font-weight: 750; letter-spacing: .13em; }
@@ -125,6 +129,26 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .config-switch input:checked + i { background: var(--success); }
 .config-switch input:checked + i::after { transform: translateX(13px); }
 .config-switch > span { color: var(--ink); font-size: 10px; }
+.source-profiles { display: grid; gap: 14px; }
+.source-profiles-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.source-profiles-heading > div { display: grid; gap: 3px; }
+.source-profiles-heading strong { font-size: 17px; }
+.source-profiles-heading span { color: var(--muted); font-size: 9px; }
+.source-profiles-empty { min-height: 100px; display: flex; align-items: center; justify-content: center; gap: 9px; border: 1px dashed var(--line-strong); border-radius: 12px; color: var(--muted); font-size: 10px; }
+.source-profile-card { display: grid; gap: 14px; border: 1px solid var(--line); border-radius: 13px; padding: 15px; background: var(--surface-muted); }
+.source-profile-card > header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; }
+.source-profile-number { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 8px; color: var(--muted); background: var(--surface); font-size: 9px; font-weight: 800; }
+.source-profile-name { min-width: 0; border: 0; border-bottom: 1px solid var(--line-strong); padding: 7px 2px; color: var(--ink); background: transparent; outline: 0; font-size: 13px; font-weight: 720; }
+.source-profile-remove { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 9px; color: var(--muted); background: transparent; cursor: pointer; }
+.source-profile-remove:hover { border-color: rgb(209 59 59 / 22%); color: var(--danger); background: rgb(209 59 59 / 7%); }
+.source-profile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.source-profile-grid label { display: grid; gap: 6px; color: var(--muted); font-size: 9px; }
+.source-profile-grid label.wide { grid-column: 1 / -1; }
+.source-profile-grid :is(input, select) { width: 100%; min-height: 40px; border: 1px solid var(--line-strong); border-radius: 9px; padding: 8px 10px; color: var(--ink); background: var(--surface); outline: 0; font: inherit; font-size: 10px; }
+.source-profile-switches { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.source-profile-switches .config-switch { background: var(--surface); }
+.source-profile-switches .config-switch.danger input:checked + i { background: var(--danger); }
+.source-profile-note { margin: 0; border-left: 2px solid var(--success); padding-left: 9px; color: var(--muted); font-size: 9px; line-height: 1.55; }
 .config-savebar { position: sticky; z-index: 10; bottom: 14px; display: flex; align-items: center; justify-content: flex-end; gap: 16px; border: 1px solid var(--line); border-radius: 13px; padding: 11px 13px; background: color-mix(in srgb, var(--surface) 92%, transparent); box-shadow: 0 12px 30px rgb(0 0 0 / 10%); backdrop-filter: blur(14px); }
 .config-savebar span { color: var(--muted); font-size: 10px; }
 .config-savebar button { color: #fff; border-color: #171717; background: #171717; }
@@ -144,6 +168,8 @@ button:disabled { cursor: not-allowed; opacity: .42; }
   .config-grid { grid-template-columns: 1fr; }
   .config-field.wide { grid-column: auto; }
   .config-section { padding: 16px; }
+  .config-categories { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .source-profile-switches { grid-template-columns: 1fr; }
   .config-savebar { bottom: 72px; }
 }
 
@@ -155,4 +181,9 @@ button:disabled { cursor: not-allowed; opacity: .42; }
   .history-table td::before { content: attr(data-label); color: var(--muted); font-size: 9px; }
   .history-table td code { max-width: none; }
   .config-savebar { align-items: stretch; flex-direction: column; }
+  .config-categories { display: flex; overflow-x: auto; }
+  .config-categories button { min-width: 112px; }
+  .source-profiles-heading { align-items: stretch; flex-direction: column; }
+  .source-profile-grid { grid-template-columns: 1fr; }
+  .source-profile-grid label.wide { grid-column: auto; }
 }

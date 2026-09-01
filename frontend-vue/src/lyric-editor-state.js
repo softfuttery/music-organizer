@@ -35,16 +35,25 @@ export function lyricBuffersFromState(lyrics = {}) {
 export function highestScoredLyricCandidate(candidates = []) {
   return (candidates || []).reduce((best, candidate) => {
     if (!best) return candidate
-    return Number(candidate?.score || 0) > Number(best?.score || 0)
+    const candidateScore = Number(candidate?.ranking_score ?? candidate?.score ?? 0)
+    const bestScore = Number(best?.ranking_score ?? best?.score ?? 0)
+    return candidateScore > bestScore
       ? candidate
       : best
   }, null)
 }
 
 export function highConfidenceLyricCandidate(candidates = [], minimumScore = 0.9) {
-  return (candidates || []).find(
+  return highConfidenceLyricCandidates(candidates, minimumScore)[0] || null
+}
+
+export function highConfidenceLyricCandidates(candidates = [], minimumScore = 0.9) {
+  return [...(candidates || [])].filter(
     (candidate) => Number(candidate?.score || 0) >= Number(minimumScore),
-  ) || null
+  ).sort((left, right) => (
+    Number(right?.ranking_score ?? right?.score ?? 0)
+    - Number(left?.ranking_score ?? left?.score ?? 0)
+  ))
 }
 
 export function lyricCandidateTitle(candidate = {}, fallback = '') {

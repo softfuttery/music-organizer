@@ -1,4 +1,4 @@
-# Fully pinned runtime dependency closure for Python 3.11 / linux-amd64.
+# Fully pinned runtime dependency closure for Python 3.11 / Linux amd64 and arm64.
 # Refresh deliberately from requirements.txt; Docker installs with --no-deps.
 APScheduler==3.10.4
 beets==2.12.0

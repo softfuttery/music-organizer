@@ -3,10 +3,11 @@
 import re
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any, Callable, Literal
 
 from .models import CueSheet, CueTrack
+from .pathsafe import resolve_confined, safe_relative_parts
 
 DEFAULT_CUE_AUDIO_EXTS = [".flac", ".wav", ".ape", ".wv", ".tta"]
 CancelCheck = Callable[[], bool]
@@ -168,39 +169,14 @@ def sanitize_filename(value: str, fallback: str) -> str:
 
 
 def _safe_relative_parts(value: str) -> tuple[str, ...]:
-    normalized = value.replace("\\", "/")
-    posix_path = PurePosixPath(normalized)
-    windows_path = PureWindowsPath(value)
-    if (
-        posix_path.is_absolute()
-        or windows_path.is_absolute()
-        or bool(windows_path.drive)
-        or bool(windows_path.root)
-        or ".." in posix_path.parts
-    ):
-        raise ValueError(f"Unsafe relative path: {value}")
-    return tuple(part for part in posix_path.parts if part not in {"", "."})
+    return safe_relative_parts(value)
 
 
 def _resolve_confined_regular_file(candidate: Path, root: Path) -> Path | None:
     try:
-        relative = candidate.relative_to(root)
+        return resolve_confined(root, candidate, kind="file", label="CUE audio")
     except ValueError:
         return None
-    current = root
-    for part in relative.parts:
-        if part in {"", ".", ".."}:
-            return None
-        current = current / part
-        if current.is_symlink():
-            return None
-    try:
-        resolved = current.resolve(strict=True)
-    except (OSError, RuntimeError):
-        return None
-    if not resolved.is_file() or not resolved.is_relative_to(root):
-        return None
-    return resolved
 
 
 def resolve_cue_audio(cue_path: Path, file_name: str) -> Path | None:

@@ -19,6 +19,7 @@ from flask import (
 
 from music_organizer.auth import is_password_hash, verify_password, write_secret_atomic
 from music_organizer.library_routes import create_library_blueprint
+from music_organizer.locking import exclusive_file_lock
 from music_organizer.lyrics_translation import (
     LyricsTranslationError,
     LyricsTranslationService,
@@ -26,6 +27,8 @@ from music_organizer.lyrics_translation import (
 from music_organizer.notifications import resolve_magicpush_token, send_magicpush
 from music_organizer.review import ReviewRepository
 from music_organizer.review_routes import create_review_blueprint
+from music_organizer.runtime import runtime_readiness
+from music_organizer.security import LoginRateLimiter
 from music_organizer.web_config import build_web_config
 from organizer import MusicOrganizer
 
@@ -68,30 +71,29 @@ def load_secret_key() -> str:
     configured = os.environ.get("SECRET_KEY", "")
     if configured:
         return configured
-    path = Path(
-        os.environ.get("SECRET_KEY_PATH")
-        or str(Path(DATABASE_PATH).parent / ".secret_key")
-    )
+    configured_path = str(os.environ.get("SECRET_KEY_PATH") or "").strip()
+    path = Path(configured_path or str(Path(DATABASE_PATH).parent / ".secret_key"))
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        value = path.read_text(encoding="utf-8").strip()
-        if value:
-            return value
-    except FileNotFoundError:
-        pass
-    value = secrets.token_hex(32)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        for _ in range(100):
+    if configured_path:
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError("configured secret key file is unavailable") from exc
+        if not value:
+            raise RuntimeError("configured secret key file is empty")
+        return value
+
+    lock_path = path.with_name(f".{path.name}.generation.lock")
+    with exclusive_file_lock(lock_path, timeout=30):
+        try:
             value = path.read_text(encoding="utf-8").strip()
             if value:
                 return value
-            time.sleep(0.01)
-        raise RuntimeError(f"secret key file was created but remained empty: {path}")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(value)
-    return value
+        except FileNotFoundError:
+            pass
+        value = secrets.token_hex(32)
+        write_secret_atomic(path, value)
+        return value
 
 
 app = Flask(__name__)
@@ -104,6 +106,17 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower()
     in {"1", "true", "yes", "on"},
+)
+trusted_hosts = [
+    value.strip()
+    for value in os.environ.get("TRUSTED_HOSTS", "").split(",")
+    if value.strip()
+]
+if trusted_hosts:
+    app.config["TRUSTED_HOSTS"] = trusted_hosts
+login_rate_limiter = LoginRateLimiter(
+    max_failures=int(os.environ.get("LOGIN_MAX_FAILURES", "5")),
+    window_seconds=float(os.environ.get("LOGIN_WINDOW_SECONDS", "60")),
 )
 organizer = MusicOrganizer(CONFIG_PATH, DATABASE_PATH, LOG_PATH, file_logging=False)
 review_repository = ReviewRepository(DATABASE_PATH)
@@ -277,13 +290,14 @@ def config_form_payload() -> dict:
             "qb_tag": qb.get("tag", ""),
             "review_enabled": bool(review.get("enabled")),
             "review_auto_discover": bool(review.get("auto_discover", True)),
-            "review_discovery_interval_seconds": review.get("discovery_interval_seconds", 15),
+            "review_discovery_interval_seconds": review.get("discovery_interval_seconds", 60),
             "review_discovery_stable_seconds": review.get("discovery_stable_seconds", 60),
             "review_identify_workers": review.get("identify_workers", 3),
             "review_proxy_url": review.get("proxy_url", ""),
             "review_proxy_username": review.get("proxy_username", ""),
             "review_proxy_password": "",
             "review_source_roots": "\n".join(review.get("source_roots", [])),
+            "review_source_profiles": review.get("source_profiles", []),
             "review_directory": review.get("directory", ""),
             "review_recycle_directory": review.get("recycle_directory", ""),
             "review_library": review.get("library", ""),
@@ -321,8 +335,12 @@ def config_form_payload() -> dict:
     }
 
 
-def worker_is_fresh() -> bool:
-    value = organizer.app_state_value("worker_heartbeat", "")
+def worker_is_fresh(state: dict[str, str] | None = None) -> bool:
+    value = (
+        state.get("worker_heartbeat", "")
+        if state is not None
+        else organizer.app_state_value("worker_heartbeat", "")
+    )
     if not value:
         return False
     try:
@@ -332,8 +350,13 @@ def worker_is_fresh() -> bool:
     return 0 <= age <= WORKER_HEARTBEAT_MAX_AGE_SECONDS
 
 
-def review_worker_status() -> str:
-    heartbeat_value = organizer.app_state_value("review_worker_heartbeat", "")
+def review_worker_status(state: dict[str, str] | None = None) -> str:
+    def state_value(key: str, default: str = "") -> str:
+        if state is not None:
+            return str(state.get(key, default))
+        return organizer.app_state_value(key, default)
+
+    heartbeat_value = state_value("review_worker_heartbeat", "")
     if not heartbeat_value:
         return "stale"
     try:
@@ -346,13 +369,13 @@ def review_worker_status() -> str:
     if not 0 <= heartbeat_age <= REVIEW_WORKER_HEARTBEAT_MAX_AGE_SECONDS:
         return "stale"
 
-    import_started = organizer.app_state_value("review_import_active_at", "")
+    import_started = state_value("review_import_active_at", "")
     if not import_started:
         return "ok"
     try:
         import_age = (now - datetime.fromisoformat(import_started)).total_seconds()
         import_timeout = float(
-            organizer.app_state_value("review_import_timeout_seconds", "")
+            state_value("review_import_timeout_seconds", "")
             or os.environ.get("REVIEW_IMPORT_TIMEOUT_SECONDS", "")
             or 3600
         )
@@ -368,6 +391,72 @@ def dashboard_stats() -> dict:
     review_counts = review_repository.scope_counts()
     data["review_active"] = review_counts["active"]
     data["review_archived"] = review_counts["archived"]
+    return data
+
+
+def aggregate_runtime_health(
+    *,
+    state: dict[str, str] | None = None,
+    review_enabled: bool | None = None,
+) -> tuple[dict, int]:
+    """Return worker health after the caller has already checked SQLite."""
+    worker_status = "ok" if worker_is_fresh(state) else "stale"
+    if review_enabled is None:
+        try:
+            review_enabled = bool(
+                organizer.load_config().get("review", {}).get("enabled", False)
+            )
+        except Exception as exc:
+            return (
+                {
+                    "status": "error",
+                    "configuration": str(exc),
+                    "web": "ok",
+                    "worker": worker_status,
+                    "source_revision": SOURCE_REVISION,
+                },
+                503,
+            )
+    current_review_worker_status = (
+        review_worker_status(state) if review_enabled else "disabled"
+    )
+    all_workers_ok = (
+        worker_status == "ok"
+        and current_review_worker_status in {"ok", "disabled"}
+    )
+    return (
+        {
+            "status": "ok" if all_workers_ok else "degraded",
+            "web": "ok",
+            "worker": worker_status,
+            "review_worker": current_review_worker_status,
+            "source_revision": SOURCE_REVISION,
+        },
+        200 if all_workers_ok else 503,
+    )
+
+
+def dashboard_payload() -> dict:
+    """Build one consistent UI snapshot without duplicate polling queries."""
+    config = organizer.load_config()
+    snapshot = organizer.repository.dashboard_runtime_snapshot()
+    state = snapshot["app_state"]
+    data = organizer.stats(config=config, snapshot=snapshot)
+    data["review_active"] = snapshot["review_counts"]["active"]
+    data["review_archived"] = snapshot["review_counts"]["archived"]
+    data["next_run_time"] = state.get("next_run_time") or None
+    data["job_status"] = snapshot["job_status"]
+    data["worker_running"] = worker_is_fresh(state)
+    data["health"] = aggregate_runtime_health(
+        state=state,
+        review_enabled=bool(config.get("review", {}).get("enabled", False)),
+    )[0]
+    data["qb_connection"] = {
+        "status": state.get("qb_last_status", "unknown"),
+        "last_attempt_at": state.get("qb_last_attempt_at", ""),
+        "last_success_at": state.get("qb_last_success_at", ""),
+        "last_error": state.get("qb_last_error", ""),
+    }
     return data
 
 
@@ -476,8 +565,11 @@ def config_page():
                 write_secret_atomic(MAGICPUSH_TOKEN_FILE, submitted_token)
             flash("配置已保存，Worker 将自动重新加载", "success")
             return redirect(url_for("config_page"))
-        except Exception as exc:
+        except (TypeError, ValueError) as exc:
             flash(str(exc), "danger")
+        except Exception:
+            app.logger.exception("Legacy configuration form save failed")
+            flash("配置保存失败，请查看服务日志", "danger")
     config = organizer.load_config()
     qbittorrent = config.get("qbittorrent", {})
     review = config.get("review", {})
@@ -587,11 +679,12 @@ def api_stop():
 
 @app.route("/api/stats")
 def api_stats():
-    data = dashboard_stats()
-    data["next_run_time"] = organizer.app_state_value("next_run_time", "") or None
-    data["job_status"] = organizer.repository.job_snapshot()
-    data["worker_running"] = worker_is_fresh()
-    return jsonify(data)
+    return jsonify(dashboard_payload())
+
+
+@app.get("/api/dashboard")
+def api_dashboard():
+    return jsonify(dashboard_payload())
 
 
 @app.route("/api/job")
@@ -617,6 +710,12 @@ def api_session():
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
+    rate_limit_key = request.remote_addr or "unknown"
+    retry_after = login_rate_limiter.retry_after(rate_limit_key)
+    if retry_after:
+        response = jsonify({"error": "登录失败次数过多，请稍后重试"})
+        response.headers["Retry-After"] = str(retry_after)
+        return response, 429
     expected_password = auth_secret()
     expected_username = os.environ.get("AUTH_USERNAME", "admin")
     payload = request.get_json(silent=True) or request.form
@@ -625,8 +724,10 @@ def api_login():
     username_matches = hmac.compare_digest(supplied_username, expected_username)
     password_matches = verify_password(expected_password, supplied_password)
     if expected_password and not (username_matches and password_matches):
+        login_rate_limiter.record_failure(rate_limit_key)
         time.sleep(0.25)
         return jsonify({"error": "用户名或密码错误"}), 401
+    login_rate_limiter.reset(rate_limit_key)
     session.clear()
     session["authenticated"] = True
     session["username"] = expected_username
@@ -713,6 +814,15 @@ def api_health():
                 "source_revision": SOURCE_REVISION,
             }
         ), 503
+    readiness = runtime_readiness(CONFIG_PATH, DATABASE_PATH)
+    if readiness["status"] != "ok":
+        return jsonify(
+            {
+                "status": "error",
+                "runtime": readiness["failed"],
+                "source_revision": SOURCE_REVISION,
+            }
+        ), 503
     component = str(request.args.get("component") or "").strip().lower()
     component = component.replace("_", "-")
     if component not in {"", "web", "worker", "review-worker"}:
@@ -762,39 +872,8 @@ def api_health():
             ),
             200 if current_review_worker_status == "ok" else 503,
         )
-    try:
-        review_enabled = bool(
-            organizer.load_config().get("review", {}).get("enabled", False)
-        )
-    except Exception as exc:
-        return jsonify(
-            {
-                "status": "error",
-                "configuration": str(exc),
-                "web": "ok",
-                "worker": worker_status,
-                "source_revision": SOURCE_REVISION,
-            }
-        ), 503
-    current_review_worker_status = (
-        review_worker_status() if review_enabled else "disabled"
-    )
-    all_workers_ok = (
-        worker_status == "ok"
-        and current_review_worker_status in {"ok", "disabled"}
-    )
-    return (
-        jsonify(
-            {
-                "status": "ok" if all_workers_ok else "degraded",
-                "web": "ok",
-                "worker": worker_status,
-                "review_worker": current_review_worker_status,
-                "source_revision": SOURCE_REVISION,
-            }
-        ),
-        200 if all_workers_ok else 503,
-    )
+    health, status_code = aggregate_runtime_health()
+    return jsonify(health), status_code
 
 
 if __name__ == "__main__":

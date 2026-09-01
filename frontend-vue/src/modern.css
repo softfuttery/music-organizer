@@ -793,6 +793,27 @@ code {
   font-size: 11px;
 }
 
+.qb-connection {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 11px;
+}
+
+.qb-connection .job-state {
+  flex: 0 0 auto;
+}
+
+.qb-connection-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: #aaa;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .command-actions {
   position: relative;
   z-index: 1;
