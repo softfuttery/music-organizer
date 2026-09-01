@@ -59,14 +59,14 @@ Docker Desktop 通常不需要手动修改 bind mount 的 UID/GID。
 docker run --rm -it \
   --user 0:0 \
   -v "$PWD/secrets:/secrets" \
-  softfuttery/music-organizer:1.8.1 \
+  softfuttery/music-organizer:1.10.0 \
   python -m music_organizer.auth --set /secrets/auth_password
 ```
 
 生成 Flask 会话签名密钥：
 
 ```bash
-docker run --rm softfuttery/music-organizer:1.8.1 \
+docker run --rm softfuttery/music-organizer:1.10.0 \
   python -c "import secrets; print(secrets.token_hex(32))" \
   > secrets/flask_secret_key
 chmod 600 secrets/auth_password secrets/flask_secret_key

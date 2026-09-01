@@ -34,6 +34,7 @@
 - Python：297 项测试及 13 个子测试通过，总覆盖率 75%。
 - 前端：60 项 Node 测试及 2 项 Vue 组件测试、ESLint 和生产构建通过。
 - Ruff、Python 与 Node 依赖审计及 Docker Compose 配置校验通过。
+- Docker Hub `1.10.0` 与 `latest` 已发布为同一 `linux/amd64` manifest，并附带 provenance 与 SBOM。
 
 ## v1.8.1 - 2026-08-26
 

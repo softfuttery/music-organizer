@@ -1,7 +1,7 @@
 name: music-organizer
 
 x-app-common: &app-common
-  image: ${MUSIC_ORGANIZER_IMAGE:-softfuttery/music-organizer:1.8.1}
+  image: ${MUSIC_ORGANIZER_IMAGE:-softfuttery/music-organizer:1.10.0}
   pull_policy: always
   restart: unless-stopped
   user: "${APP_UID:-1026}:${APP_GID:-100}"

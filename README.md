@@ -10,15 +10,15 @@ Music Organizer 是一个基于 Flask、SQLite 和 Vue 3 的音乐整理服务�
 [最新源码版本 v1.10.0](https://github.com/softfuttery/music-organizer/releases/tag/v1.10.0) · [更新日志](CHANGELOG.md) · [部署指南](DEPLOYMENT.md)
 
 v1.10.0 新增按来源目录独立配置的预审工作流、大批次分页和浏览器兼容的 ALAC
-试听。当前 Docker Hub 预构建镜像仍为 `1.8.1`；GitHub v1.10.0 Release 提供的是
-已验证的源码快照，不应把镜像标签直接改为尚未发布的 `1.10.0`。
+试听。Docker Hub 同步提供 `linux/amd64` 镜像，`1.10.0` 与 `latest` 指向同一份
+带 provenance 和 SBOM 的构建结果。
 
 ## 使用 Docker 部署
 
 仓库中的 [docker-compose.yml](docker-compose.yml) 默认使用公开镜像：
 
 ```text
-softfuttery/music-organizer:1.8.1
+softfuttery/music-organizer:1.10.0
 ```
 
 最简启动流程：
@@ -72,8 +72,9 @@ mode: hardlink
 - Docker Hub: https://hub.docker.com/r/softfuttery/music-organizer
 - GitHub: https://github.com/softfuttery/music-organizer
 - 当前稳定源码标签：`v1.10.0`
-- 当前预构建镜像标签：`1.8.1`
+- 当前预构建镜像标签：`1.10.0`、`latest`
 - 当前预构建镜像平台：`linux/amd64`
+- 镜像 digest：`sha256:50ff636792dd7928ad330e50eea33a189691e44aa24fd7a27785909f78c936f2`
 
 ## 安全提示
 
